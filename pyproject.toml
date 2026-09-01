@@ -1,0 +1,60 @@
+[project]
+name = "codepulse"
+version = "0.1.0"
+description = "Semantic Codebase Intelligence Engine"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    # API & Web Framework
+    "fastapi>=0.111.0,<0.112.0",
+    "uvicorn[standard]>=0.30.0,<0.31.0",
+    "pydantic>=2.7.0,<2.8.0",
+    "pydantic-settings>=2.3.0,<2.4.0",
+
+    # Relational & Vector Storage
+    "psycopg[binary]>=3.1.19,<3.2.0",
+    "pgvector>=0.3.1,<0.4.0",
+    "sqlalchemy>=2.0.30,<2.1.0",
+    "alembic>=1.13.1,<1.14.0",
+
+    # Embedded Keyword Search
+    "tantivy>=0.22.0,<0.23.0",
+
+    # Caching & Job Queue (Redis Streams)
+    "redis>=5.0.4,<5.1.0",
+
+    # Code Parsing & AST (Bundled, zero-compile)
+    "tree-sitter>=0.21.0,<0.22.0",
+    "tree-sitter-languages>=1.10.2",
+
+    # AI / Embeddings
+    "sentence-transformers>=3.0.0,<3.1.0",
+    "torch>=2.3.0,<2.4.0",
+
+    # Utilities & Monitoring
+    "prometheus-client>=0.20.0,<0.21.0",
+    "httpx>=0.27.0,<0.28.0",
+    "structlog>=24.1.0,<24.2.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.7",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.4.8",
+    "mypy>=1.10.0"
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
