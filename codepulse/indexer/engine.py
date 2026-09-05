@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -209,32 +210,104 @@ class IndexingEngine:
         all_symbols: list[Symbol],
         all_chunks: list[CodeChunk],
     ) -> dict[str, int]:
-        """Persists repository hierarchy to the database."""
+        """
+        Persists repository hierarchy to the database.
+
+        Phase 0.3 behavior (Repository/File upsert with content_hash):
+          - Repository rows are upserted by natural key `url` -- the same
+            value used consistently across calls to `index_directory` (an
+            explicit git/repo URL, or the absolute local repo path when none
+            is given). Re-indexing the same repository updates the existing
+            row instead of inserting a duplicate one.
+          - File rows are upserted by natural key `(repo_id, path)`:
+              * new path            -> insert a new File row.
+              * existing path, same content_hash    -> reuse the row as-is
+                (only `last_indexed` is refreshed); no new row is created.
+              * existing path, different content_hash -> update the existing
+                row in place (no new row is created).
+            Both natural keys are also enforced with a UNIQUE constraint at
+            the database level (see storage/db.py), so this invariant does
+            not depend on application logic alone.
+          - Symbol and Dependency rows are NOT upserted in this milestone --
+            that is Phase 0.4 (symbol upsert) / Phase 3 (call-graph
+            confidence) scope. Re-indexing still appends new Symbol and
+            Dependency rows every time. This is a known, intentional
+            limitation of Phase 0.3.
+        """
         session = self.storage.get_session()
         try:
-            repo_record = RepositoryModel(
-                name=repo_name,
-                url=repo_url,
-                file_count=len(parsed_files),
-                symbol_count=len(all_symbols),
+            now = datetime.utcnow()
+
+            # --- Repository upsert (natural key: url) ---
+            repo_record = (
+                session.query(RepositoryModel)
+                .filter(RepositoryModel.url == repo_url)
+                .first()
             )
-            session.add(repo_record)
-            session.flush()
-
-            file_record_map: dict[str, FileModel] = {}
-            for pf in parsed_files:
-                fm = FileModel(
-                    repo_id=repo_record.id,
-                    path=pf.file_path,
-                    language=pf.language,
-                    size_bytes=pf.file_size_bytes,
-                    line_count=pf.line_count,
+            if repo_record is None:
+                repo_record = RepositoryModel(
+                    name=repo_name,
+                    url=repo_url,
+                    file_count=len(parsed_files),
+                    symbol_count=len(all_symbols),
+                    last_sync=now,
                 )
-                session.add(fm)
-                file_record_map[pf.file_path] = fm
+                session.add(repo_record)
+            else:
+                repo_record.name = repo_name
+                repo_record.file_count = len(parsed_files)
+                repo_record.symbol_count = len(all_symbols)
+                repo_record.last_sync = now
 
             session.flush()
 
+            # --- File upsert (natural key: (repo_id, path)) ---
+            file_record_map: dict[str, FileModel] = {}
+            new_files = 0
+            updated_files = 0
+            unchanged_files = 0
+
+            for pf in parsed_files:
+                existing_fm = (
+                    session.query(FileModel)
+                    .filter(
+                        FileModel.repo_id == repo_record.id,
+                        FileModel.path == pf.file_path,
+                    )
+                    .first()
+                )
+
+                if existing_fm is None:
+                    fm = FileModel(
+                        repo_id=repo_record.id,
+                        path=pf.file_path,
+                        language=pf.language,
+                        size_bytes=pf.file_size_bytes,
+                        line_count=pf.line_count,
+                        content_hash=pf.content_hash,
+                        last_indexed=now,
+                    )
+                    session.add(fm)
+                    file_record_map[pf.file_path] = fm
+                    new_files += 1
+                elif existing_fm.content_hash != pf.content_hash:
+                    existing_fm.language = pf.language
+                    existing_fm.size_bytes = pf.file_size_bytes
+                    existing_fm.line_count = pf.line_count
+                    existing_fm.content_hash = pf.content_hash
+                    existing_fm.last_indexed = now
+                    file_record_map[pf.file_path] = existing_fm
+                    updated_files += 1
+                else:
+                    # Content unchanged: reuse the existing row untouched aside
+                    # from a freshness timestamp -- do not insert another row.
+                    existing_fm.last_indexed = now
+                    file_record_map[pf.file_path] = existing_fm
+                    unchanged_files += 1
+
+            session.flush()
+
+            # --- Symbols: intentionally not upserted yet (Phase 0.4 scope) ---
             symbol_record_map: dict[tuple[str, str], SymbolModel] = {}
             for sym in all_symbols:
                 fm = file_record_map.get(sym.file_path)
@@ -258,7 +331,7 @@ class IndexingEngine:
 
             session.flush()
 
-            # Persist call graph edges
+            # Persist call graph edges (unchanged; not upserted -- Phase 3 scope)
             if self.call_graph:
                 for edge in self.call_graph.edges:
                     dm = DependencyModel(
@@ -274,6 +347,9 @@ class IndexingEngine:
             return {
                 "repo_id": repo_record.id,
                 "saved_files": len(file_record_map),
+                "new_files": new_files,
+                "updated_files": updated_files,
+                "unchanged_files": unchanged_files,
                 "saved_symbols": len(symbol_record_map),
             }
         except Exception as e:

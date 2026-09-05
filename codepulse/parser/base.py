@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from codepulse.models import FileParseResult, ImportStatement, Symbol, CallReference
+from codepulse.models import (
+    FileParseResult,
+    ImportStatement,
+    Symbol,
+    CallReference,
+    compute_content_hash,
+)
 
 
 class LanguageParser(ABC):
@@ -38,6 +44,7 @@ class LanguageParser(ABC):
         
         line_count = len(source_code.splitlines())
         file_size_bytes = len(source_code.encode("utf-8"))
+        content_hash = compute_content_hash(source_code)
 
         return FileParseResult(
             file_path=file_path,
@@ -47,4 +54,5 @@ class LanguageParser(ABC):
             calls=calls,
             file_size_bytes=file_size_bytes,
             line_count=line_count,
+            content_hash=content_hash,
         )

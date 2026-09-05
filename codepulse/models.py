@@ -77,3 +77,23 @@ class FileParseResult(BaseModel):
     calls: list[CallReference] = Field(default_factory=list)
     file_size_bytes: int = 0
     line_count: int = 0
+    content_hash: str = Field(
+        default="",
+        description=(
+            "SHA-256 hex digest of the file's raw source content, used as the "
+            "change-detection key for idempotent File upsert (Phase 0.3)."
+        ),
+    )
+
+
+def compute_content_hash(content: str) -> str:
+    """
+    Computes a deterministic SHA-256 hex digest for whole-file content.
+
+    Follows the same hashing convention already used for `Symbol.body_hash`
+    (SHA-256 over UTF-8-encoded text). Unlike `Symbol.body_hash`, the content
+    is NOT stripped first: a file's identity hash must reflect the exact
+    persisted bytes so that whitespace-only edits still register as a real
+    content change during incremental re-indexing.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()

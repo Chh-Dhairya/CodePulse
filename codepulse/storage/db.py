@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Float,
+    UniqueConstraint,
     create_engine,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
@@ -21,6 +22,15 @@ Base = declarative_base()
 
 class RepositoryModel(Base):
     __tablename__ = "repositories"
+    __table_args__ = (
+        # Natural key for repository identity (Phase 0.3): a repository is
+        # identified by its `url` (the git URL, or the absolute local path
+        # when indexing a local directory with no explicit URL -- see
+        # IndexingEngine.index_directory). Enforced at the DB level so a
+        # duplicate Repository row can never be created for the same
+        # logical repository, even under a bug or a race.
+        UniqueConstraint("url", name="uq_repositories_url"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     team_id = Column(Integer, default=1, nullable=False)
@@ -36,6 +46,12 @@ class RepositoryModel(Base):
 
 class FileModel(Base):
     __tablename__ = "files"
+    __table_args__ = (
+        # Natural key for file identity (Phase 0.3): a file is identified by
+        # (repo_id, path). Enforced at the DB level so a duplicate File row
+        # can never be created for the same path within the same repository.
+        UniqueConstraint("repo_id", "path", name="uq_files_repo_id_path"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
@@ -43,6 +59,11 @@ class FileModel(Base):
     language = Column(String(50), nullable=False)
     size_bytes = Column(Integer, default=0)
     line_count = Column(Integer, default=0)
+    # SHA-256 hex digest of the file's content (see codepulse.models.compute_content_hash).
+    # Nullable because historical rows created before Phase 0.3 have no recorded
+    # original content to hash (see the Phase 0.3 migration for details) --
+    # such rows get a real hash the next time the file is (re-)indexed.
+    content_hash = Column(String(64), nullable=True)
     last_indexed = Column(DateTime, default=datetime.utcnow)
 
     repository = relationship("RepositoryModel", back_populates="files")
