@@ -25,7 +25,7 @@ Phase 0.6 — Repository-scoped search (remove global singleton) (verified COMPL
 | Phase 0.3 — Repository/File Upsert + content_hash | COMPLETE | 41/41 full suite passed; migration verified non-destructive, then applied to the real `codepulse.db` | `571a21d` |
 | Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` | COMPLETE | 49/49 full suite passed; migration verified non-destructive, then applied to the real `codepulse.db` | `e0b3ec0` |
 | Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed; migration verified non-destructive, then applied to the real `codepulse.db` | `50dbe22` |
-| Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed (58 pre-existing + 11 new); no migration required; verified against the real `codepulse.db` read-only | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed (58 pre-existing + 11 new); no migration required; verified against the real `codepulse.db` read-only | `aea7518` |
 | Phase 0.7 — Remove fabricated metric values from API responses | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
@@ -93,7 +93,6 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 
 ## Current Risks
 
-- The Phase 0.6 code changes (engine, bm25, api/app.py, tests) are implemented, fully tested, and verified against the real `codepulse.db`, but **not yet committed to git** as of this update — see Exact Next Action. Do not assume they're committed without checking `git status`/`git log`.
 - `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 0.6 (this milestone didn't need to touch it), still worth splitting up eventually.
 - Only `repositories`, `files`, `symbols`, `code_embeddings` are idempotent; `dependencies` is not (Phase 3 scope) — unaffected by, and unrelated to, this milestone's repository-scoping work (scoping and idempotency are separate concerns).
 
@@ -104,12 +103,11 @@ Implement Phase 0.7 — Remove all hardcoded/fabricated metric values from API r
 
 ## Context Handoff Notes
 
-Phase 0.6 implementation is complete and verified in this session:
+Phase 0.6 implementation is complete, verified, and committed (`aea7518`):
 
 - What was done: `IndexingEngine.search()` gained a `repository_id: int | None = None` parameter (`codepulse/indexer/engine.py`) that filters BM25/vector candidates by a `repo_id` metadata tag before truncation to `limit`, for all three search modes; `_resolve_repo_id()` resolves the real `RepositoryModel.id` before parsing so documents can be tagged as they're created; `call_graph` became per-repository (`call_graphs: dict[int, CallGraphBuilder]`); `hydrate_repository()` tags hydrated vectors the same way; `BM25Index.add_symbol()` gained an optional `repo_id` parameter (`codepulse/search/bm25.py`); `api/app.py`'s `/v1/search` and `/v1/ide-search` now pass their existing (previously unused) `repository_id` request field through.
 - What was verified: full suite 69/69 passed (27 potentially-affected pre-existing tests re-run explicitly first); 11 new isolation tests using two repositories with deliberately overlapping content (same file path, same symbol name) prove no cross-repo leakage for keyword/semantic/hybrid search, correct unscoped behavior, nonexistent/empty-repository handling, and determinism; real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) and a fresh engine constructed against it hydrates and accepts scoped search calls without crashing.
 - No Alembic migration was created (none needed — `RepositoryModel.id`, already established, is the scope identifier).
-- What remains: **committing this work to git** (not yet done as of this document update — the user's instructions for this milestone explicitly said not to commit unless asked), then starting Phase 0.7.
-- Exact files changed this session (uncommitted at time of writing): `codepulse/indexer/engine.py`, `codepulse/search/bm25.py`, `codepulse/api/app.py` (all modified); `tests/test_repository_scoped_search.py` (new); this file updated.
+- Committed as `aea7518` (5 files changed: `codepulse/indexer/engine.py`, `codepulse/search/bm25.py`, `codepulse/api/app.py` modified; `tests/test_repository_scoped_search.py` new; this file updated).
 - Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 69 passed, 0 failed.
 - Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.7, starting with re-reading roadmap §21 ("No endpoint may return a metric it did not actually measure") and §3's fabricated-metrics finding table.
