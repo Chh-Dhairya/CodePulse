@@ -25,9 +25,18 @@ def test_api_autocomplete_endpoint():
 
 
 def test_api_feedback_endpoint():
+    """
+    Phase 0.7: the endpoint no longer claims "recorded" / "weights
+    updated" -- it doesn't persist anything or touch ranking weights, so
+    its response must not claim otherwise. Updated from the pre-0.7
+    assertion (`status == "recorded"`), which encoded exactly the
+    fabricated success claim this milestone removes.
+    """
     response = client.post(
         "/v1/search/feedback",
         json={"search_id": "test_search_1", "result_id": 1, "feedback": "relevant"},
     )
     assert response.status_code == 200
-    assert response.json()["status"] == "recorded"
+    data = response.json()
+    assert data["status"] == "received"
+    assert "weights updated" not in data["message"].lower()

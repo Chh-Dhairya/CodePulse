@@ -114,10 +114,13 @@ def index_repository(req: IndexRepoRequest, bg_tasks: BackgroundTasks):
 
     bg_tasks.add_task(run_indexing)
 
+    # Phase 0.7: no `estimated_time_seconds` here -- indexing duration is
+    # not measured or predicted anywhere in the system (no timing model,
+    # no historical job data), so a fixed guess would be a fabricated
+    # metric. Real job progress/duration tracking is Phase 1 (IndexJob).
     return {
         "job_id": job_id,
         "status": "queued",
-        "estimated_time_seconds": 10,
         "url": req.url,
     }
 
@@ -130,6 +133,11 @@ def get_index_status(repo_id: int):
     session = storage_manager.get_session()
     try:
         repo = session.query(RepositoryModel).filter(RepositoryModel.id == repo_id).first()
+        # Phase 0.7: no `index_size_mb` in either branch below -- no on-disk
+        # or in-memory index-footprint measurement exists anywhere in the
+        # system, so a fixed number would be a fabricated metric with no
+        # authoritative source. `embedding_model` is kept: it's a
+        # configured value (the actual model name in use), not a metric.
         if not repo:
             # Fallback stats from current memory engine
             return {
@@ -139,7 +147,6 @@ def get_index_status(repo_id: int):
                 "indexed_symbols": len(indexing_engine.symbols_by_id),
                 "last_indexed": "live",
                 "embedding_model": indexing_engine.embedder.model_name,
-                "index_size_mb": 12,
             }
 
         return {
@@ -149,7 +156,6 @@ def get_index_status(repo_id: int):
             "indexed_symbols": repo.symbol_count,
             "last_indexed": repo.last_sync.isoformat() if repo.last_sync else "",
             "embedding_model": indexing_engine.embedder.model_name,
-            "index_size_mb": 15,
         }
     finally:
         session.close()
@@ -363,13 +369,17 @@ def get_repository_stats(repo_id: int):
             langs[l]["files"] += 1
             langs[l]["symbols"] += len(res.symbols)
 
+        # Phase 0.7: no `total_queries` / `avg_search_latency_ms` here --
+        # no query log or latency-aggregation table exists anywhere in the
+        # system (SearchFeedback/query-logging is a later roadmap
+        # milestone), so fixed numbers would be fabricated metrics with no
+        # authoritative source. Building that tracking infrastructure now
+        # would be scope creep beyond removing fabricated values.
         return {
             "repository_id": repo_id,
             "total_files": file_count,
             "total_symbols": symbol_count,
             "languages": langs,
-            "total_queries": 100,
-            "avg_search_latency_ms": 45,
         }
     finally:
         session.close()
@@ -410,9 +420,15 @@ def ide_search(req: IdeSearchRequest):
 # -------------------------------------------------------------
 @app.post("/v1/search/feedback")
 def submit_feedback(req: FeedbackRequest):
+    # Phase 0.7: this endpoint does not persist feedback anywhere (no
+    # SearchFeedback table/row is written) and does not adjust ranking
+    # weights. The previous response claimed both ("status": "recorded",
+    # "...Weights updated.") -- a fabricated success/effect claim. Real
+    # persistence is a later roadmap milestone (B28); until then, the
+    # response must not claim an effect that didn't happen.
     return {
-        "status": "recorded",
+        "status": "received",
         "search_id": req.search_id,
         "result_id": req.result_id,
-        "message": "Thank you for feedback. Weights updated.",
+        "message": "Feedback received. Not yet persisted or used to adjust ranking.",
     }
