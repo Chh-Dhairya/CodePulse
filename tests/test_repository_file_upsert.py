@@ -13,8 +13,10 @@ to verify:
   - The natural-key invariants are enforced at the database level, not only
     in application logic.
 
-Symbol/Dependency rows are intentionally NOT covered for idempotency here --
-that remains non-idempotent until Phase 0.4, per the Phase 0.3 scope.
+Dependency (call graph edge) rows are intentionally NOT covered for
+idempotency here -- that remains non-idempotent until Phase 3 (call-graph
+confidence scoring), per the roadmap's scope. Symbol upsert is covered by
+tests/test_symbol_upsert.py as of Phase 0.4.
 """
 from __future__ import annotations
 
@@ -246,14 +248,16 @@ def test_content_hash_matches_shared_convention(tmp_path, temp_db_url):
         session.close()
 
 
-# --- known, intentional limitation: symbols are not yet upserted (0.4) ----
+# --- symbols are now upserted too, as of Phase 0.4 -------------------------
 
-def test_symbols_are_still_duplicated_on_reindex_pending_phase_0_4(tmp_path, temp_db_url):
+def test_symbols_are_deduplicated_on_reindex_phase_0_4(tmp_path, temp_db_url):
     """
-    Documents current, expected behavior: Phase 0.3 fixes Repository/File
-    duplication but intentionally leaves Symbol upsert to Phase 0.4. This
-    test exists so a future Phase 0.4 change is expected to update/remove it
-    rather than silently regressing without anyone noticing.
+    Updated for Phase 0.4 (Symbol upsert by (file_id, name, start_line)):
+    re-indexing an unchanged repository must no longer duplicate Symbol
+    rows either. See tests/test_symbol_upsert.py for the full, focused
+    Phase 0.4 test coverage; this test stays here as the same end-to-end
+    regression check its Phase 0.3 predecessor was, now updated to match
+    the roadmap-approved behavior change Phase 0.4 introduced.
     """
     from codepulse.storage.db import SymbolModel
 
@@ -266,11 +270,6 @@ def test_symbols_are_still_duplicated_on_reindex_pending_phase_0_4(tmp_path, tem
     session = engine.storage.get_session()
     try:
         symbols = session.query(SymbolModel).filter(SymbolModel.name == "f").all()
-        # NOT asserting ==1 here: Symbol upsert is out of scope for Phase 0.3.
-        assert len(symbols) == 2, (
-            "expected symbols to still duplicate on re-index until Phase 0.4 "
-            "implements symbol upsert -- if this now fails with 1, Phase 0.4 "
-            "may already be implemented and this test should be updated."
-        )
+        assert len(symbols) == 1, "unchanged symbol must not be duplicated on re-index"
     finally:
         session.close()

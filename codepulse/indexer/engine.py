@@ -228,11 +228,21 @@ class IndexingEngine:
             Both natural keys are also enforced with a UNIQUE constraint at
             the database level (see storage/db.py), so this invariant does
             not depend on application logic alone.
-          - Symbol and Dependency rows are NOT upserted in this milestone --
-            that is Phase 0.4 (symbol upsert) / Phase 3 (call-graph
-            confidence) scope. Re-indexing still appends new Symbol and
-            Dependency rows every time. This is a known, intentional
-            limitation of Phase 0.3.
+        Phase 0.4 behavior (Symbol upsert by (file_id, name, start_line)):
+          - Symbol rows are upserted by natural key `(file_id, name,
+            start_line)`, using `body_hash` for change detection:
+              * new (file_id, name, start_line)     -> insert a new row.
+              * existing key, same body_hash         -> reuse the row
+                untouched (zero writes -- Symbol has no freshness/timestamp
+                field to refresh, unlike File).
+              * existing key, different body_hash    -> update the existing
+                row in place (no new row is created).
+            Enforced with a UNIQUE constraint at the database level (see
+            storage/db.py), not only in application logic.
+          - Dependency (call graph edge) rows are NOT upserted in this
+            milestone -- that is Phase 3 (call-graph confidence) scope.
+            Re-indexing still appends new Dependency rows every time. This
+            is a known, intentional limitation of Phase 0.4.
         """
         session = self.storage.get_session()
         try:
@@ -307,27 +317,63 @@ class IndexingEngine:
 
             session.flush()
 
-            # --- Symbols: intentionally not upserted yet (Phase 0.4 scope) ---
-            symbol_record_map: dict[tuple[str, str], SymbolModel] = {}
+            # --- Symbol upsert (natural key: (file_id, name, start_line)) ---
+            symbol_record_map: dict[tuple[str, str, int], SymbolModel] = {}
+            new_symbols = 0
+            updated_symbols = 0
+            unchanged_symbols = 0
+
             for sym in all_symbols:
                 fm = file_record_map.get(sym.file_path)
                 if not fm:
                     continue
-                sm = SymbolModel(
-                    file_id=fm.id,
-                    name=sym.name,
-                    type=sym.type.value if hasattr(sym.type, "value") else str(sym.type),
-                    start_line=sym.start_line,
-                    end_line=sym.end_line,
-                    signature=sym.signature,
-                    docstring=sym.docstring,
-                    body=sym.body,
-                    body_hash=sym.body_hash,
-                    language=sym.language,
-                    complexity=sym.complexity,
+
+                sym_type_value = sym.type.value if hasattr(sym.type, "value") else str(sym.type)
+                map_key = (sym.file_path, sym.name, sym.start_line)
+
+                existing_sm = (
+                    session.query(SymbolModel)
+                    .filter(
+                        SymbolModel.file_id == fm.id,
+                        SymbolModel.name == sym.name,
+                        SymbolModel.start_line == sym.start_line,
+                    )
+                    .first()
                 )
-                session.add(sm)
-                symbol_record_map[(sym.file_path, sym.name)] = sm
+
+                if existing_sm is None:
+                    sm = SymbolModel(
+                        file_id=fm.id,
+                        name=sym.name,
+                        type=sym_type_value,
+                        start_line=sym.start_line,
+                        end_line=sym.end_line,
+                        signature=sym.signature,
+                        docstring=sym.docstring,
+                        body=sym.body,
+                        body_hash=sym.body_hash,
+                        language=sym.language,
+                        complexity=sym.complexity,
+                    )
+                    session.add(sm)
+                    symbol_record_map[map_key] = sm
+                    new_symbols += 1
+                elif existing_sm.body_hash != sym.body_hash:
+                    existing_sm.type = sym_type_value
+                    existing_sm.end_line = sym.end_line
+                    existing_sm.signature = sym.signature
+                    existing_sm.docstring = sym.docstring
+                    existing_sm.body = sym.body
+                    existing_sm.body_hash = sym.body_hash
+                    existing_sm.language = sym.language
+                    existing_sm.complexity = sym.complexity
+                    symbol_record_map[map_key] = existing_sm
+                    updated_symbols += 1
+                else:
+                    # Content unchanged: reuse the existing row untouched --
+                    # zero net writes, per the roadmap's Phase 0 idempotency rule.
+                    symbol_record_map[map_key] = existing_sm
+                    unchanged_symbols += 1
 
             session.flush()
 
@@ -351,6 +397,9 @@ class IndexingEngine:
                 "updated_files": updated_files,
                 "unchanged_files": unchanged_files,
                 "saved_symbols": len(symbol_record_map),
+                "new_symbols": new_symbols,
+                "updated_symbols": updated_symbols,
+                "unchanged_symbols": unchanged_symbols,
             }
         except Exception as e:
             session.rollback()

@@ -78,9 +78,9 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the Phase 0.3 migration)
+        # Verify revision recorded (head now includes the Phase 0.4 migration)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "20fc2d0607e2"
+        assert current_rev == "3ba396e9c78f"
 
         # Verify columns on symbols table
         symbol_cols = {col["name"]: col for col in insp.get_columns("symbols")}
@@ -107,6 +107,12 @@ def test_fresh_database_migration_scenario_1():
         assert any(
             uc["column_names"] == ["url"] for uc in repo_uniques
         ), f"Expected a UNIQUE(url) constraint on repositories, got: {repo_uniques}"
+
+        # Verify Phase 0.4 constraint on symbols
+        symbol_uniques = insp.get_unique_constraints("symbols")
+        assert any(
+            set(uc["column_names"]) == {"file_id", "name", "start_line"} for uc in symbol_uniques
+        ), f"Expected a UNIQUE(file_id, name, start_line) constraint on symbols, got: {symbol_uniques}"
 
         # 3. Verify application connects and operates on migrated database
         storage = StorageManager(db_url=db_url)
@@ -178,7 +184,7 @@ def test_existing_database_stamping_scenario_2():
 
         # Verify alembic_version is now recorded
         current_rev = get_current_revision(db_url)
-        assert current_rev == "20fc2d0607e2"
+        assert current_rev == "3ba396e9c78f"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
@@ -248,8 +254,10 @@ def test_phase_0_3_migration_preserves_data_and_adds_content_hash():
             )
             conn.commit()
 
-        # 2. Upgrade to the new head.
-        run_migrations(db_url=db_url, revision="head")
+        # 2. Upgrade to the Phase 0.3 revision specifically (not generic
+        #    "head" -- this test targets that one migration step in
+        #    isolation, and must keep doing so as later migrations are added).
+        run_migrations(db_url=db_url, revision="20fc2d0607e2")
         assert get_current_revision(db_url) == "20fc2d0607e2"
 
         # 3. Pre-existing data preserved untouched.
@@ -345,6 +353,157 @@ def test_phase_0_3_migration_refuses_to_apply_over_duplicate_data():
         # The database must remain at the old revision -- migration aborted,
         # nothing silently half-applied.
         assert get_current_revision(db_url) == "21a7cb7f1a85"
+
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_phase_0_4_migration_preserves_data_and_adds_symbol_uniqueness():
+    """
+    SCENARIO 4 (Phase 0.4) — Upgrading a pre-Phase-0.4 database:
+    1. Build a database at the Phase 0.3 head (20fc2d0607e2, no
+       (file_id, name, start_line) uniqueness on symbols yet) and populate
+       it with data, simulating a real post-Phase-0.3 codepulse.db state.
+    2. Upgrade to the new head (3ba396e9c78f).
+    3. Verify all pre-existing rows (including symbols) are preserved
+       untouched.
+    4. Verify the new UNIQUE(file_id, name, start_line) constraint on
+       `symbols` is now enforced at the DB level.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        # 1. Build the Phase 0.3 schema and seed data (as if Phase 0.3 had
+        #    already run for real, matching this project's actual history).
+        run_migrations(db_url=db_url, revision="20fc2d0607e2")
+        assert get_current_revision(db_url) == "20fc2d0607e2"
+
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                    "VALUES (1, 1, 'phase03_repo', 'file:///phase03/path', 1, 1)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO files (id, repo_id, path, language, size_bytes, line_count, content_hash) "
+                    "VALUES (1, 1, 'main.py', 'python', 42, 5, 'deadbeef')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language, body_hash) "
+                    "VALUES (1, 1, 'existing_func', 'function', 1, 5, 'python', 'abc123')"
+                )
+            )
+            conn.commit()
+
+        # 2. Upgrade to the new head.
+        run_migrations(db_url=db_url, revision="head")
+        assert get_current_revision(db_url) == "3ba396e9c78f"
+
+        # 3. Pre-existing data preserved untouched.
+        with engine.connect() as conn:
+            symbol_row = conn.execute(
+                text("SELECT id, file_id, name, start_line, body_hash FROM symbols WHERE id = 1")
+            ).fetchone()
+            assert symbol_row is not None
+            assert symbol_row[2] == "existing_func"
+            assert symbol_row[4] == "abc123"
+
+            repo_count = conn.execute(text("SELECT count(*) FROM repositories")).scalar()
+            file_count = conn.execute(text("SELECT count(*) FROM files")).scalar()
+            symbol_count = conn.execute(text("SELECT count(*) FROM symbols")).scalar()
+            assert (repo_count, file_count, symbol_count) == (1, 1, 1)
+
+        # 4. New UNIQUE constraint is enforced going forward.
+        with engine.connect() as conn:
+            with pytest.raises(Exception):
+                conn.execute(
+                    text(
+                        "INSERT INTO symbols (file_id, name, type, start_line, end_line, language) "
+                        "VALUES (1, 'existing_func', 'function', 1, 5, 'python')"
+                    )
+                )
+                conn.commit()
+
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_phase_0_4_migration_refuses_to_apply_over_duplicate_data():
+    """
+    The Phase 0.4 migration must not silently corrupt or lose data if the
+    pre-existing database already violates the new (file_id, name,
+    start_line) uniqueness it's about to add. It should fail loudly instead.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        run_migrations(db_url=db_url, revision="20fc2d0607e2")
+
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                    "VALUES (1, 1, 'dup_repo', 'file:///dup/path', 1, 2)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO files (id, repo_id, path, language) "
+                    "VALUES (1, 1, 'dup.py', 'python')"
+                )
+            )
+            # Two Symbol rows with the same (file_id, name, start_line) --
+            # pre-existing duplicate that would violate the new constraint.
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language) "
+                    "VALUES (1, 1, 'dup_func', 'function', 1, 2, 'python')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language) "
+                    "VALUES (2, 1, 'dup_func', 'function', 1, 2, 'python')"
+                )
+            )
+            conn.commit()
+
+        with pytest.raises(Exception):
+            run_migrations(db_url=db_url, revision="head")
+
+        # The database must remain at the old revision -- migration aborted,
+        # nothing silently half-applied.
+        assert get_current_revision(db_url) == "20fc2d0607e2"
 
     finally:
         if engine is not None:

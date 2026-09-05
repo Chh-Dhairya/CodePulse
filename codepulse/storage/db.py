@@ -72,6 +72,15 @@ class FileModel(Base):
 
 class SymbolModel(Base):
     __tablename__ = "symbols"
+    __table_args__ = (
+        # Natural key for symbol identity (Phase 0.4): a symbol is identified
+        # by (file_id, name, start_line), per the roadmap's Phase 0
+        # idempotency rule. Enforced at the DB level so a duplicate Symbol
+        # row can never be created for the same symbol within the same file.
+        UniqueConstraint(
+            "file_id", "name", "start_line", name="uq_symbols_file_id_name_start_line"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     file_id = Column(Integer, ForeignKey("files.id", ondelete="CASCADE"), nullable=False)
