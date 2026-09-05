@@ -26,7 +26,7 @@ Phase 0.7 — Remove all hardcoded metric values from API responses (verified CO
 | Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` | COMPLETE | 49/49 full suite passed; migration applied to real `codepulse.db` | `e0b3ec0` |
 | Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed; migration applied to real `codepulse.db` | `50dbe22` |
 | Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed; no migration required | `aea7518` |
-| Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed (69 pre-existing + 5 new); no migration required; verified against the real `codepulse.db` read-only | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed (69 pre-existing + 5 new); no migration required; verified against the real `codepulse.db` read-only | `704c41d` |
 | Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
@@ -114,12 +114,11 @@ Implement Phase 0.8 — `.gitignore`/`.codepulseignore`-respecting file discover
 
 ## Context Handoff Notes
 
-Phase 0.7 implementation is complete and verified in this session:
+Phase 0.7 implementation is complete, verified, and committed (`704c41d`):
 
 - What was done: audited every field in `codepulse/api/app.py`'s 12 endpoints (confirmed to be the only FastAPI app/API surface in the codebase) against a 5-way classification (legit/configured/fabricated/unavailable/ambiguous); removed `index_size_mb`, `estimated_time_seconds`, `total_queries`, `avg_search_latency_ms`; corrected `/v1/search/feedback`'s false `"recorded"`/"weights updated" claims to honest `"received"`/"not yet persisted" wording; added `tests/test_no_fabricated_metrics.py` (5 new tests against real HTTP responses); updated `tests/test_api.py`'s one affected assertion with the change documented in its own docstring.
 - What was verified: full suite 74/74 passed; the one test that would otherwise have written to the real `codepulse.db` (`POST /v1/repositories/index`, since `TestClient` runs `BackgroundTasks` synchronously) was safely isolated via monkeypatching the app module's `storage_manager`/`indexing_engine` to a temp DB, with the redirect explicitly confirmed; real `codepulse.db` re-verified unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after the full run.
 - No Alembic migration was created (none needed).
-- What remains: **committing this work to git** (not yet done as of this document update — the user's instructions for this milestone explicitly said not to commit), then starting Phase 0.8.
-- Exact files changed this session (uncommitted at time of writing): `codepulse/api/app.py`, `tests/test_api.py` (both modified); `tests/test_no_fabricated_metrics.py` (new); this file updated.
+- Committed as `704c41d` (4 files changed: `codepulse/api/app.py`, `tests/test_api.py` modified; `tests/test_no_fabricated_metrics.py` new; this file updated).
 - Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 74 passed, 0 failed.
 - Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.8, starting with re-reading roadmap §16 (secrets/ignore-file handling design) and B6's definition of done ("ignored files never appear in the index").
