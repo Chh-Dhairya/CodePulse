@@ -23,7 +23,7 @@ Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` (verified COMPLETE)
 | B1 — Config system | COMPLETE | 7/7 tests in `tests/test_config.py`; config wired into `storage/db.py`, `embedder.py`, `bm25.py`, `cli.py`, `api/app.py` | `101607d` |
 | Alembic migration infrastructure | IMPLEMENTED | 3/3 tests in `tests/test_migrations.py`; live `codepulse.db` confirmed stamped at initial revision | `4ccba7a` |
 | Phase 0.3 — Repository/File Upsert + content_hash | COMPLETE | 41/41 full suite passed; migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | `571a21d` (implementation), migration applied to real DB in a later session (uncommitted app-state, not a code change) |
-| Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` | COMPLETE | 49/49 full suite passed (41 pre-existing + 8 new/updated); migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | *(pending commit this session — see below)* |
+| Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` | COMPLETE | 49/49 full suite passed (41 pre-existing + 8 new/updated); migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | `e0b3ec0` |
 | Phase 0.5 — Embedding persistence + hydration | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
@@ -95,7 +95,6 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 
 ## Current Risks
 
-- The Phase 0.4 code changes (schema, migration, engine logic, tests) are implemented, fully tested, and applied to the real `codepulse.db`, but **not yet committed to git** as of this update — see Exact Next Action. Do not assume they're committed without checking `git status`/`git log`.
 - The silent pseudo-embedding fallback in `codepulse/embeddings/embedder.py` is still live. Any work touching embeddings must not treat its output as a real embedding signal — this is precisely what Phase 0.5 must fix.
 - `_persist_to_db` in `codepulse/indexer/engine.py` now has three upsert blocks (repo/file/symbol) in one function/session. Phase 0.5's embedding-persistence work will need to extend this same function carefully, keyed off the now-stable `symbol_record_map` (keyed by `(file_path, name, start_line)`) without breaking the Phase 0.3/0.4 behavior it depends on.
 - Dependency (call graph edge) rows are the last remaining non-idempotent write in the core loop — do not assume the whole indexing pipeline is idempotent; only Repository/File/Symbol are, as of Phase 0.4.
@@ -103,15 +102,14 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 ## Exact Next Action
 
 NEXT ACTION:
-Commit the Phase 0.4 working-tree changes (schema, migration `3ba396e9c78f`, engine logic, tests), then implement Phase 0.5 — Embedding persistence + load-on-startup hydration according to the authoritative roadmap.
+Implement Phase 0.5 — Embedding persistence + load-on-startup hydration according to the authoritative roadmap (see roadmap §37 0.5, §11 EmbeddingModel notes, and the "no silent pseudo-embedding fallback" invariant this milestone must finally satisfy in `codepulse/embeddings/embedder.py`).
 
 ## Context Handoff Notes
 
-Phase 0.4 implementation is complete and verified in this session:
+Phase 0.4 implementation is complete, verified, and committed (`e0b3ec0`):
 
 - What was done: added `UniqueConstraint(file_id, name, start_line)` to `SymbolModel` (`codepulse/storage/db.py`); rewrote the symbol persistence block in `IndexingEngine._persist_to_db` (`codepulse/indexer/engine.py`) to query-then-insert-or-update by that natural key, using `body_hash` for change detection; added Alembic migration `3ba396e9c78f` (chained after `20fc2d0607e2`) with a pre-flight duplicate check; added `tests/test_symbol_upsert.py` (6 new tests); updated `tests/test_repository_file_upsert.py` (1 test updated from "still duplicates" to "now deduplicated," per its own anticipated-update docstring); updated `tests/test_migrations.py` (revision literals + 2 new Phase 0.4 migration tests + fixed one Phase 0.3 test that used generic `"head"`).
 - What was verified: full suite 49/49 passed; Phase 0.4 migration verified non-destructive against a disposable copy of the real `codepulse.db` (128 symbols preserved, new constraint confirmed to reject a real duplicate insert); both the Phase 0.3 and Phase 0.4 migrations were then applied to the real `codepulse.db` itself (at explicit user instruction) and re-verified (revision `3ba396e9c78f`, all row counts unchanged: 1/18/128/528/0).
-- What remains: **committing this work to git** (not yet done as of this document update), then starting Phase 0.5.
-- Exact files changed this session (uncommitted at time of writing): `codepulse/storage/db.py`, `codepulse/indexer/engine.py`, `tests/test_migrations.py`, `tests/test_repository_file_upsert.py` (all modified); `alembic/versions/3ba396e9c78f_add_symbol_natural_key_uniqueness.py`, `tests/test_symbol_upsert.py` (both new).
+- Committed as `e0b3ec0` (7 files changed: `codepulse/storage/db.py`, `codepulse/indexer/engine.py`, `tests/test_migrations.py`, `tests/test_repository_file_upsert.py` modified; `alembic/versions/3ba396e9c78f_add_symbol_natural_key_uniqueness.py`, `tests/test_symbol_upsert.py` new; this file updated).
 - Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 49 passed, 0 failed.
-- Exact next step: `git add` the files above, commit with a clear Phase-0.4 message, then follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.5.
+- Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.5, starting with re-reading the roadmap's §17/§34 guidance on removing the silent pseudo-embedding fallback and making embedding persistence real.
