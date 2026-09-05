@@ -10,8 +10,8 @@ from typing import Any, Callable
 import numpy as np
 
 from codepulse.embeddings.chunker import CodeChunk, SemanticChunker
-from codepulse.embeddings.embedder import CodeEmbedder
-from codepulse.models import FileParseResult, Symbol
+from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableError
+from codepulse.models import FileParseResult, Symbol, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
 from codepulse.search.bm25 import BM25Index
@@ -88,6 +88,19 @@ class IndexingEngine:
         self.parse_results: dict[str, FileParseResult] = {}
         self.symbols_by_id: dict[str, Symbol] = {}
 
+        # Phase 0.5: load-on-startup hydration. Restores the in-memory
+        # vector index from durably persisted embeddings so semantic search
+        # is functional immediately after a fresh process/engine starts,
+        # without requiring a full re-index. This only reads already-computed
+        # vectors from the database -- it never calls the embedding model,
+        # so it's cheap even before any model weights are loaded. A failure
+        # here (e.g. a corrupt row) is logged and does not prevent the
+        # engine from starting; it simply leaves that data un-hydrated.
+        try:
+            self.hydrate_all()
+        except Exception as e:
+            logger.warning("Startup embedding hydration failed (continuing without it): %s", e)
+
     def index_directory(
         self,
         repo_path: str,
@@ -117,6 +130,12 @@ class IndexingEngine:
         parsed_files: list[FileParseResult] = []
         all_symbols: list[Symbol] = []
         all_chunks: list[CodeChunk] = []
+        # Maps id(chunk) -> the Symbol object it was generated from. Needed
+        # because a chunk's own start_line/end_line describe the chunk's
+        # line range (which differs from the symbol's for body_chunk pieces),
+        # not the symbol's identity -- this is how embeddings get correctly
+        # linked back to a specific Symbol row during persistence (Phase 0.5).
+        chunk_symbol_map: dict[int, Symbol] = {}
 
         # 2. Parse files with AST parsers
         for idx, file_path in enumerate(all_files, start=1):
@@ -140,6 +159,8 @@ class IndexingEngine:
                     all_symbols.append(sym)
                     # Generate semantic chunks
                     chunks = self.chunker.chunk_symbol(sym)
+                    for c in chunks:
+                        chunk_symbol_map[id(c)] = sym
                     all_chunks.extend(chunks)
 
             except Exception as e:
@@ -156,25 +177,49 @@ class IndexingEngine:
         self.call_graph = CallGraphBuilder(parsed_files)
 
         # 4. Generate Embeddings & Populate Vector Index
+        #
+        # Permanent invariant: NO silent pseudo-embedding fallback. If the
+        # configured embedding model cannot be loaded or fails to encode,
+        # CodeEmbedder.encode() raises EmbeddingUnavailableError -- caught
+        # here explicitly. Symbol/File persistence still proceeds (lexical
+        # search remains available, per roadmap §17's "degraded mode"), but
+        # no embedding is generated, persisted, or added to the vector index
+        # for this run, and the failure is reported in the returned stats
+        # rather than silently reported as success.
+        chunk_embeddings: list[tuple[Symbol, CodeChunk, np.ndarray]] = []
+        embedding_error: str | None = None
+
         if all_chunks:
             chunk_texts = [c.content for c in all_chunks]
-            embeddings = self.embedder.encode(chunk_texts)
+            try:
+                embeddings = self.embedder.encode(chunk_texts)
+            except EmbeddingUnavailableError as e:
+                embedding_error = str(e)
+                logger.error(
+                    "Embedding generation failed for '%s' -- proceeding in "
+                    "lexical-only degraded mode, no embeddings persisted this run: %s",
+                    repo_path,
+                    e,
+                )
+                embeddings = None
 
-            doc_ids = []
-            metadatas = []
-            for idx, c in enumerate(all_chunks):
-                doc_id = f"{c.file_path}::{c.symbol_name}::{c.chunk_index}"
-                doc_ids.append(doc_id)
-                metadatas.append({
-                    "symbol_name": c.symbol_name,
-                    "file_path": c.file_path,
-                    "chunk_type": c.chunk_type,
-                    "start_line": c.start_line,
-                    "end_line": c.end_line,
-                    "snippet": c.content[:200],
-                })
+            if embeddings is not None:
+                doc_ids = []
+                metadatas = []
+                for idx, c in enumerate(all_chunks):
+                    doc_id = f"{c.file_path}::{c.symbol_name}::{c.chunk_index}"
+                    doc_ids.append(doc_id)
+                    metadatas.append({
+                        "symbol_name": c.symbol_name,
+                        "file_path": c.file_path,
+                        "chunk_type": c.chunk_type,
+                        "start_line": c.start_line,
+                        "end_line": c.end_line,
+                        "snippet": c.content[:200],
+                    })
+                    chunk_embeddings.append((chunk_symbol_map[id(c)], c, embeddings[idx]))
 
-            self.vector_index.add_batch(doc_ids, embeddings, metadatas)
+                self.vector_index.add_batch(doc_ids, embeddings, metadatas)
 
         # 5. Populate BM25 Index
         for sym in all_symbols:
@@ -191,6 +236,7 @@ class IndexingEngine:
             parsed_files=parsed_files,
             all_symbols=all_symbols,
             all_chunks=all_chunks,
+            chunk_embeddings=chunk_embeddings,
         )
 
         return {
@@ -199,6 +245,9 @@ class IndexingEngine:
             "total_symbols": len(all_symbols),
             "total_chunks": len(all_chunks),
             "call_graph_edges": len(self.call_graph.edges),
+            "embedding_status": "failed" if embedding_error else ("skipped_no_chunks" if not all_chunks else "success"),
+            "embedding_error": embedding_error,
+            "degraded_mode": embedding_error is not None,
             "database_stats": stats,
         }
 
@@ -209,6 +258,7 @@ class IndexingEngine:
         parsed_files: list[FileParseResult],
         all_symbols: list[Symbol],
         all_chunks: list[CodeChunk],
+        chunk_embeddings: list[tuple[Symbol, CodeChunk, np.ndarray]] | None = None,
     ) -> dict[str, int]:
         """
         Persists repository hierarchy to the database.
@@ -243,6 +293,28 @@ class IndexingEngine:
             milestone -- that is Phase 3 (call-graph confidence) scope.
             Re-indexing still appends new Dependency rows every time. This
             is a known, intentional limitation of Phase 0.4.
+        Phase 0.5 behavior (Embedding persistence + hydration):
+          - Embedding rows are upserted by natural key `(symbol_id,
+            chunk_type, chunk_index)`, using a `content_hash` of the chunk's
+            own text for change detection:
+              * new (symbol_id, chunk_type, chunk_index) -> insert a new row.
+              * existing key, same content_hash          -> reuse the row
+                untouched; no new row is created.
+              * existing key, different content_hash     -> update the
+                existing row in place (no new row is created).
+            Enforced with a UNIQUE constraint at the database level (see
+            storage/db.py), not only in application logic. `chunk_embeddings`
+            is empty whenever embedding generation failed or produced no
+            chunks this run -- in that case no Embedding rows are touched at
+            all (existing durable embeddings are left exactly as they were;
+            nothing is deleted just because this run couldn't re-embed).
+          - A chunk whose parent symbol no longer produces a chunk at that
+            (chunk_type, chunk_index) after a content change (e.g. a large
+            function shrinks below the multi-chunk threshold) can leave a
+            stale Embedding row behind -- this mirrors Phase 0.4's decision
+            not to delete stale Symbol rows, and is intentionally out of
+            scope here too (real stale-data cleanup is Phase 3, per the
+            roadmap's `ON DELETE CASCADE` design for whole-symbol removal).
         """
         session = self.storage.get_session()
         try:
@@ -377,6 +449,60 @@ class IndexingEngine:
 
             session.flush()
 
+            # --- Embedding upsert (natural key: (symbol_id, chunk_type, chunk_index)) ---
+            new_embeddings = 0
+            updated_embeddings = 0
+            unchanged_embeddings = 0
+
+            for sym, chunk, vector in (chunk_embeddings or []):
+                map_key = (sym.file_path, sym.name, sym.start_line)
+                sm = symbol_record_map.get(map_key)
+                if not sm:
+                    # The symbol this chunk belongs to wasn't persisted this
+                    # run (shouldn't normally happen -- every symbol that
+                    # produces chunks also goes through the upsert above).
+                    continue
+
+                chash = compute_content_hash(chunk.content)
+                embedding_json = json.dumps(np.asarray(vector, dtype=np.float64).tolist())
+
+                existing_em = (
+                    session.query(EmbeddingModel)
+                    .filter(
+                        EmbeddingModel.symbol_id == sm.id,
+                        EmbeddingModel.chunk_type == chunk.chunk_type,
+                        EmbeddingModel.chunk_index == chunk.chunk_index,
+                    )
+                    .first()
+                )
+
+                if existing_em is None:
+                    em = EmbeddingModel(
+                        symbol_id=sm.id,
+                        chunk_type=chunk.chunk_type,
+                        chunk_index=chunk.chunk_index,
+                        embedding_json=embedding_json,
+                        chunk_content=chunk.content,
+                        content_hash=chash,
+                        embedding_model=self.embedder.model_name,
+                        embedding_dim=int(np.asarray(vector).shape[-1]),
+                    )
+                    session.add(em)
+                    new_embeddings += 1
+                elif existing_em.content_hash != chash:
+                    existing_em.embedding_json = embedding_json
+                    existing_em.chunk_content = chunk.content
+                    existing_em.content_hash = chash
+                    existing_em.embedding_model = self.embedder.model_name
+                    existing_em.embedding_dim = int(np.asarray(vector).shape[-1])
+                    updated_embeddings += 1
+                else:
+                    # Content unchanged: reuse the existing row untouched --
+                    # zero net writes, per the roadmap's Phase 0 idempotency rule.
+                    unchanged_embeddings += 1
+
+            session.flush()
+
             # Persist call graph edges (unchanged; not upserted -- Phase 3 scope)
             if self.call_graph:
                 for edge in self.call_graph.edges:
@@ -400,6 +526,9 @@ class IndexingEngine:
                 "new_symbols": new_symbols,
                 "updated_symbols": updated_symbols,
                 "unchanged_symbols": unchanged_symbols,
+                "new_embeddings": new_embeddings,
+                "updated_embeddings": updated_embeddings,
+                "unchanged_embeddings": unchanged_embeddings,
             }
         except Exception as e:
             session.rollback()
@@ -407,6 +536,131 @@ class IndexingEngine:
             return {"error": str(e)}
         finally:
             session.close()
+
+    def hydrate_repository(self, repo_url: str) -> dict[str, Any]:
+        """
+        Phase 0.5 -- load-on-startup hydration.
+
+        Restores the in-memory `vector_index` for ONE repository from
+        durably persisted `code_embeddings` rows, without re-parsing or
+        re-embedding anything. This is what makes semantic search survive a
+        process restart: a fresh `IndexingEngine` can call this to become
+        functional again purely from the database, no embedding-model call
+        required.
+
+        Only semantic retrieval is restored this way. Keyword/hybrid search
+        and the call graph (`bm25_index`, `symbols_by_id`, `call_graph`) are
+        not durable and still require a fresh `index_directory()` call --
+        `BM25Index`/`CallGraphBuilder` have no backing DB table; persisting
+        them is out of Phase 0.5's scope (that's Phase 2/Phase 3 territory).
+
+        Repository scoping: only embeddings that belong to Symbols whose
+        File belongs to the given `repo_url` are loaded, so embeddings from
+        one repository can never be hydrated into another's results (this
+        is not the same thing as Phase 0.6's repository-scoped *search* --
+        it only guarantees the persistence/hydration layer itself doesn't
+        mix repositories; `search()` remains global/unscoped, unchanged).
+
+        Vector-dimension safety: a persisted row whose `embedding_dim`
+        doesn't match the currently configured `vector_index.dimension` is
+        skipped explicitly (e.g. the embedding model or dimension was
+        changed since that row was written) rather than being loaded and
+        silently corrupting similarity results.
+        """
+        session = self.storage.get_session()
+        try:
+            repo_record = (
+                session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+            )
+            if repo_record is None:
+                return {"repo_id": None, "hydrated_embeddings": 0, "skipped_dimension_mismatch": 0}
+
+            rows = (
+                session.query(EmbeddingModel, SymbolModel, FileModel)
+                .join(SymbolModel, EmbeddingModel.symbol_id == SymbolModel.id)
+                .join(FileModel, SymbolModel.file_id == FileModel.id)
+                .filter(FileModel.repo_id == repo_record.id)
+                .all()
+            )
+
+            doc_ids: list[str] = []
+            vectors: list[np.ndarray] = []
+            metadatas: list[dict[str, Any]] = []
+            skipped_dimension_mismatch = 0
+
+            for em, sm, fm in rows:
+                if em.embedding_dim is not None and em.embedding_dim != self.vector_index.dimension:
+                    skipped_dimension_mismatch += 1
+                    continue
+                try:
+                    raw = json.loads(em.embedding_json)
+                except (TypeError, ValueError) as e:
+                    logger.warning(
+                        "Skipping unreadable embedding row id=%s during hydration: %s", em.id, e
+                    )
+                    continue
+                vec = np.asarray(raw, dtype=np.float32)
+                if vec.shape[-1] != self.vector_index.dimension:
+                    skipped_dimension_mismatch += 1
+                    continue
+
+                doc_id = f"{fm.path}::{sm.name}::{em.chunk_index}"
+                doc_ids.append(doc_id)
+                vectors.append(vec)
+                metadatas.append({
+                    "symbol_name": sm.name,
+                    "file_path": fm.path,
+                    "chunk_type": em.chunk_type,
+                    "start_line": sm.start_line,
+                    "end_line": sm.end_line,
+                    "snippet": (em.chunk_content or "")[:200],
+                })
+
+            if vectors:
+                self.vector_index.add_batch(doc_ids, np.vstack(vectors), metadatas)
+
+            return {
+                "repo_id": repo_record.id,
+                "hydrated_embeddings": len(doc_ids),
+                "skipped_dimension_mismatch": skipped_dimension_mismatch,
+            }
+        finally:
+            session.close()
+
+    def hydrate_all(self) -> dict[str, Any]:
+        """
+        Phase 0.5 -- load-on-startup hydration for every repository in the
+        database. Called automatically once from `__init__` so a freshly
+        constructed engine (e.g. a new server process) has semantic search
+        available immediately from durable storage, without re-indexing.
+        See `hydrate_repository` for the per-repository details.
+        """
+        session = self.storage.get_session()
+        try:
+            repo_urls = [r.url for r in session.query(RepositoryModel.url).all()]
+        finally:
+            session.close()
+
+        total_hydrated = 0
+        total_skipped = 0
+        for url in repo_urls:
+            result = self.hydrate_repository(url)
+            total_hydrated += result["hydrated_embeddings"]
+            total_skipped += result["skipped_dimension_mismatch"]
+
+        if total_hydrated or total_skipped:
+            logger.info(
+                "Startup hydration: %d embeddings loaded across %d repositories (%d skipped: dimension mismatch)",
+                total_hydrated,
+                len(repo_urls),
+                total_skipped,
+            )
+
+        return {
+            "repositories": len(repo_urls),
+            "hydrated_embeddings": total_hydrated,
+            "skipped_dimension_mismatch": total_skipped,
+        }
 
     def search(
         self,

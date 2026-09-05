@@ -112,12 +112,37 @@ class DependencyModel(Base):
 
 class EmbeddingModel(Base):
     __tablename__ = "code_embeddings"
+    __table_args__ = (
+        # Natural key for embedding identity (Phase 0.5), per the roadmap's
+        # Phase 0 idempotency rule (§8): "(symbol_id, chunk_type,
+        # chunk_index)". Enforced at the DB level so a duplicate Embedding
+        # row can never be created for the same chunk of the same symbol.
+        UniqueConstraint(
+            "symbol_id", "chunk_type", "chunk_index", name="uq_code_embeddings_symbol_chunk"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol_id = Column(Integer, ForeignKey("symbols.id", ondelete="CASCADE"), nullable=False)
     chunk_type = Column(String(50), default="signature_doc")  # 'signature_doc', 'body_chunk', 'full'
+    # Position of this chunk among a symbol's chunks (see
+    # codepulse.embeddings.chunker.CodeChunk.chunk_index); part of the
+    # natural key together with (symbol_id, chunk_type).
+    chunk_index = Column(Integer, nullable=False, default=0)
     embedding_json = Column(Text, nullable=False)  # JSON serialized array of floats for portability
     chunk_content = Column(Text, default="")
+    # SHA-256 hex digest of `chunk_content` (see codepulse.models.compute_content_hash),
+    # used for change detection: reuse the row if unchanged, update in place
+    # if the chunk's source content changed. Nullable because historical
+    # rows created before Phase 0.5 have no recorded hash.
+    content_hash = Column(String(64), nullable=True)
+    # Identity of the model that produced this vector, and its dimension --
+    # recorded so hydration can detect a model/dimension change and skip
+    # loading an incompatible vector rather than silently corrupting the
+    # in-memory vector index (roadmap §9: "embedding dimension/model must be
+    # recorded"). Nullable for the same reason as content_hash.
+    embedding_model = Column(String(150), nullable=True)
+    embedding_dim = Column(Integer, nullable=True)
 
     symbol = relationship("SymbolModel", back_populates="embeddings")
 

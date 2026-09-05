@@ -10,6 +10,19 @@ DEFAULT_MODEL_NAME = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
 
 
+class EmbeddingUnavailableError(RuntimeError):
+    """
+    Raised when the configured embedding model cannot be loaded or cannot
+    produce a real embedding.
+
+    Permanent project invariant (see CLAUDE.md / roadmap §17, §34): there is
+    NO pseudo-embedding fallback. Callers MUST treat this as an explicit,
+    observable failure -- skip persisting/using the affected vectors and
+    report a degraded (lexical-only) status -- never silently substitute a
+    hash-based, random, or otherwise fabricated vector in its place.
+    """
+
+
 class CodeEmbedder:
     """
     Generates dense vector embeddings for code snippets and natural language queries.
@@ -36,18 +49,26 @@ class CodeEmbedder:
                 logger.info("Loading embedding model '%s' on %s...", self.model_name, self.device)
                 self._model = SentenceTransformer(self.model_name, device=self.device)
             except Exception as e:
-                logger.warning(
-                    "Could not load SentenceTransformer ('%s'): %s. Using deterministic fallback.",
+                logger.error(
+                    "Failed to load embedding model '%s': %s. No pseudo-embedding "
+                    "fallback will be used -- embedding generation must fail explicitly.",
                     self.model_name,
                     e,
                 )
-                self._model = "fallback"
+                raise EmbeddingUnavailableError(
+                    f"Embedding model '{self.model_name}' could not be loaded: {e}"
+                ) from e
         return self._model
 
     def encode(self, texts: str | list[str], batch_size: int = 32) -> np.ndarray:
         """
         Encodes a single string or list of strings into normalized embedding vectors.
-        Returns a numpy array of shape (N, 384).
+        Returns a numpy array of shape (N, dimension).
+
+        Raises EmbeddingUnavailableError if the configured model cannot be
+        loaded or fails to produce embeddings. There is no fallback path --
+        callers are responsible for handling this explicitly (see
+        EmbeddingUnavailableError's docstring).
         """
         is_single = isinstance(texts, str)
         text_list = [texts] if is_single else texts
@@ -57,7 +78,7 @@ class CodeEmbedder:
 
         model = self._get_model()
 
-        if model != "fallback":
+        try:
             embeddings = model.encode(
                 text_list,
                 batch_size=batch_size,
@@ -65,19 +86,15 @@ class CodeEmbedder:
                 convert_to_numpy=True,
                 normalize_embeddings=True,
             )
-            return embeddings[0] if is_single else embeddings
-        else:
-            # Deterministic pseudo-embedding for testing when weights aren't downloaded
-            arr = np.zeros((len(text_list), self.dimension), dtype=np.float32)
-            for idx, t in enumerate(text_list):
-                import hashlib
-                h = hashlib.sha256(t.encode("utf-8")).digest()
-                # 384 floats * 4 bytes/float = 1536 bytes (32 bytes * 48 = 1536)
-                raw = np.frombuffer((h * 48)[: self.dimension * 4], dtype=np.float32).copy()
-                norm = np.linalg.norm(raw)
-                arr[idx] = raw / (norm if norm > 0 else 1.0)
+        except EmbeddingUnavailableError:
+            raise
+        except Exception as e:
+            logger.error("Embedding model '%s' failed to encode input: %s", self.model_name, e)
+            raise EmbeddingUnavailableError(
+                f"Embedding model '{self.model_name}' failed to encode input: {e}"
+            ) from e
 
-            return arr[0] if is_single else arr
+        return embeddings[0] if is_single else embeddings
 
     @staticmethod
     def cosine_similarity(v1: np.ndarray, v2: np.ndarray) -> float:

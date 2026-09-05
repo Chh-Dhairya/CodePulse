@@ -78,9 +78,9 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the Phase 0.4 migration)
+        # Verify revision recorded (head now includes the Phase 0.5 migration)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "3ba396e9c78f"
+        assert current_rev == "49572f834366"
 
         # Verify columns on symbols table
         symbol_cols = {col["name"]: col for col in insp.get_columns("symbols")}
@@ -113,6 +113,19 @@ def test_fresh_database_migration_scenario_1():
         assert any(
             set(uc["column_names"]) == {"file_id", "name", "start_line"} for uc in symbol_uniques
         ), f"Expected a UNIQUE(file_id, name, start_line) constraint on symbols, got: {symbol_uniques}"
+
+        # Verify Phase 0.5 columns/constraint on code_embeddings
+        embedding_cols = {col["name"]: col for col in insp.get_columns("code_embeddings")}
+        assert "chunk_index" in embedding_cols
+        assert "content_hash" in embedding_cols
+        assert "embedding_model" in embedding_cols
+        assert "embedding_dim" in embedding_cols
+
+        embedding_uniques = insp.get_unique_constraints("code_embeddings")
+        assert any(
+            set(uc["column_names"]) == {"symbol_id", "chunk_type", "chunk_index"}
+            for uc in embedding_uniques
+        ), f"Expected a UNIQUE(symbol_id, chunk_type, chunk_index) constraint on code_embeddings, got: {embedding_uniques}"
 
         # 3. Verify application connects and operates on migrated database
         storage = StorageManager(db_url=db_url)
@@ -184,7 +197,7 @@ def test_existing_database_stamping_scenario_2():
 
         # Verify alembic_version is now recorded
         current_rev = get_current_revision(db_url)
-        assert current_rev == "3ba396e9c78f"
+        assert current_rev == "49572f834366"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
@@ -412,8 +425,10 @@ def test_phase_0_4_migration_preserves_data_and_adds_symbol_uniqueness():
             )
             conn.commit()
 
-        # 2. Upgrade to the new head.
-        run_migrations(db_url=db_url, revision="head")
+        # 2. Upgrade to the Phase 0.4 revision specifically (not generic
+        #    "head" -- this test targets that one migration step in
+        #    isolation, and must keep doing so as later migrations are added).
+        run_migrations(db_url=db_url, revision="3ba396e9c78f")
         assert get_current_revision(db_url) == "3ba396e9c78f"
 
         # 3. Pre-existing data preserved untouched.
@@ -504,6 +519,185 @@ def test_phase_0_4_migration_refuses_to_apply_over_duplicate_data():
         # The database must remain at the old revision -- migration aborted,
         # nothing silently half-applied.
         assert get_current_revision(db_url) == "20fc2d0607e2"
+
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_phase_0_5_migration_preserves_data_and_adds_embedding_fields():
+    """
+    SCENARIO 5 (Phase 0.5) — Upgrading a pre-Phase-0.5 database:
+    1. Build a database at the Phase 0.4 head (3ba396e9c78f, no chunk_index/
+       content_hash/embedding_model/embedding_dim on code_embeddings yet)
+       and populate it with data, including an embedding row, simulating a
+       real post-Phase-0.4 codepulse.db state.
+    2. Upgrade to the new head (49572f834366).
+    3. Verify all pre-existing rows (including the embedding row) are
+       preserved untouched.
+    4. Verify the new UNIQUE(symbol_id, chunk_type, chunk_index) constraint
+       on `code_embeddings` is now enforced at the DB level.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        # 1. Build the Phase 0.4 schema and seed data (as if Phase 0.3/0.4
+        #    had already run for real, matching this project's actual history).
+        run_migrations(db_url=db_url, revision="3ba396e9c78f")
+        assert get_current_revision(db_url) == "3ba396e9c78f"
+
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                    "VALUES (1, 1, 'phase04_repo', 'file:///phase04/path', 1, 1)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO files (id, repo_id, path, language, size_bytes, line_count, content_hash) "
+                    "VALUES (1, 1, 'main.py', 'python', 42, 5, 'deadbeef')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language, body_hash) "
+                    "VALUES (1, 1, 'existing_func', 'function', 1, 5, 'python', 'abc123')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO code_embeddings (id, symbol_id, chunk_type, embedding_json, chunk_content) "
+                    "VALUES (1, 1, 'signature_doc', '[0.1, 0.2, 0.3]', 'def existing_func(): ...')"
+                )
+            )
+            conn.commit()
+
+        # 2. Upgrade to the new head.
+        run_migrations(db_url=db_url, revision="head")
+        assert get_current_revision(db_url) == "49572f834366"
+
+        # 3. Pre-existing data preserved untouched.
+        with engine.connect() as conn:
+            embedding_row = conn.execute(
+                text(
+                    "SELECT id, symbol_id, chunk_type, chunk_index, embedding_json, "
+                    "content_hash, embedding_model, embedding_dim FROM code_embeddings WHERE id = 1"
+                )
+            ).fetchone()
+            assert embedding_row is not None
+            assert embedding_row[1] == 1  # symbol_id preserved
+            assert embedding_row[2] == "signature_doc"  # chunk_type preserved
+            assert embedding_row[4] == "[0.1, 0.2, 0.3]"  # embedding_json untouched
+
+            # New columns: chunk_index defaults to 0 for pre-existing rows;
+            # content_hash/embedding_model/embedding_dim are honestly NULL,
+            # not a fabricated value (no original chunk text was hashed).
+            assert embedding_row[3] == 0
+            assert embedding_row[5] is None
+            assert embedding_row[6] is None
+            assert embedding_row[7] is None
+
+            repo_count = conn.execute(text("SELECT count(*) FROM repositories")).scalar()
+            file_count = conn.execute(text("SELECT count(*) FROM files")).scalar()
+            symbol_count = conn.execute(text("SELECT count(*) FROM symbols")).scalar()
+            embedding_count = conn.execute(text("SELECT count(*) FROM code_embeddings")).scalar()
+            assert (repo_count, file_count, symbol_count, embedding_count) == (1, 1, 1, 1)
+
+        # 4. New UNIQUE constraint is enforced going forward.
+        with engine.connect() as conn:
+            with pytest.raises(Exception):
+                conn.execute(
+                    text(
+                        "INSERT INTO code_embeddings (symbol_id, chunk_type, chunk_index, embedding_json) "
+                        "VALUES (1, 'signature_doc', 0, '[0.9, 0.9, 0.9]')"
+                    )
+                )
+                conn.commit()
+
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_phase_0_5_migration_refuses_to_apply_over_duplicate_data():
+    """
+    The Phase 0.5 migration must not silently corrupt or lose data if the
+    pre-existing database already violates the new (symbol_id, chunk_type,
+    chunk_index) uniqueness it's about to add (every pre-existing row would
+    default to chunk_index=0). It should fail loudly instead.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        run_migrations(db_url=db_url, revision="3ba396e9c78f")
+
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                    "VALUES (1, 1, 'dup_repo', 'file:///dup/path', 1, 1)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO files (id, repo_id, path, language) "
+                    "VALUES (1, 1, 'dup.py', 'python')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language) "
+                    "VALUES (1, 1, 'dup_func', 'function', 1, 2, 'python')"
+                )
+            )
+            # Two Embedding rows with the same (symbol_id, chunk_type) --
+            # pre-existing duplicate that would collide once both default to
+            # chunk_index=0, violating the new constraint.
+            conn.execute(
+                text(
+                    "INSERT INTO code_embeddings (id, symbol_id, chunk_type, embedding_json) "
+                    "VALUES (1, 1, 'signature_doc', '[0.1]')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO code_embeddings (id, symbol_id, chunk_type, embedding_json) "
+                    "VALUES (2, 1, 'signature_doc', '[0.2]')"
+                )
+            )
+            conn.commit()
+
+        with pytest.raises(Exception):
+            run_migrations(db_url=db_url, revision="head")
+
+        # The database must remain at the old revision -- migration aborted,
+        # nothing silently half-applied.
+        assert get_current_revision(db_url) == "3ba396e9c78f"
 
     finally:
         if engine is not None:
