@@ -82,7 +82,12 @@ class FeedbackRequest(BaseModel):
 @app.post("/v1/search")
 def search(req: SearchRequest):
     t0 = time.time()
-    results = indexing_engine.search(req.query, limit=req.limit, search_type=req.search_type)
+    results = indexing_engine.search(
+        req.query,
+        limit=req.limit,
+        search_type=req.search_type,
+        repository_id=req.repository_id,
+    )
     exec_time_ms = int((time.time() - t0) * 1000)
 
     return {
@@ -376,7 +381,12 @@ def get_repository_stats(repo_id: int):
 @app.post("/v1/ide-search")
 def ide_search(req: IdeSearchRequest):
     t0 = time.time()
-    results = indexing_engine.search(req.selected_text, limit=req.limit, search_type="hybrid")
+    results = indexing_engine.search(
+        req.selected_text,
+        limit=req.limit,
+        search_type="hybrid",
+        repository_id=req.repository_id,
+    )
     exec_time_ms = int((time.time() - t0) * 1000)
 
     return {

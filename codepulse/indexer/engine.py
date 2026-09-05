@@ -84,9 +84,23 @@ class IndexingEngine:
         self.bm25_index = BM25Index()
         self.vector_index = VectorIndex(dimension=self.embedder.dimension)
         self.ranker = HybridRanker()
+        # `call_graph` mirrors the most recently indexed repository's graph
+        # (pre-Phase-0.6 behavior, preserved for existing callers -- cli.py's
+        # cmd_impact and api/app.py's analyze_impact are single/last-repo-
+        # oriented and out of this milestone's scope). `call_graphs` is the
+        # Phase 0.6 addition: one CallGraphBuilder per repository, keyed by
+        # RepositoryModel.id, so multiple indexed repositories' graphs can
+        # coexist without one overwriting another -- needed so hybrid
+        # search's graph-derived score can be correctly repository-scoped.
         self.call_graph: CallGraphBuilder | None = None
+        self.call_graphs: dict[int, CallGraphBuilder] = {}
         self.parse_results: dict[str, FileParseResult] = {}
         self.symbols_by_id: dict[str, Symbol] = {}
+        # Phase 0.6: doc_id -> owning RepositoryModel.id, built alongside
+        # symbols_by_id, so hybrid search's graph-score step can skip
+        # symbols belonging to a different repository than the one a scoped
+        # search is asking about.
+        self.symbol_repo_map: dict[str, int] = {}
 
         # Phase 0.5: load-on-startup hydration. Restores the in-memory
         # vector index from durably persisted embeddings so semantic search
@@ -101,6 +115,33 @@ class IndexingEngine:
         except Exception as e:
             logger.warning("Startup embedding hydration failed (continuing without it): %s", e)
 
+    def _resolve_repo_id(self, repo_name: str, repo_url: str) -> int:
+        """
+        Phase 0.6: resolves (or creates) the RepositoryModel row for
+        `repo_url` and returns its id, BEFORE parsing/chunking/embedding
+        begins. Needed so in-memory BM25/vector documents can be tagged with
+        the correct, real `repo_id` at the moment they're added -- reusing
+        the exact natural key (`url`) and upsert semantics established in
+        Phase 0.3, not a second identity system.
+
+        `_persist_to_db` performs its own (idempotent) upsert of the same
+        row later with final file/symbol counts -- that's unaffected by
+        this early lookup, which only needs the stable id and creates the
+        row with zero counts if it doesn't exist yet (harmless: a repo row
+        with file_count=0 momentarily, corrected the moment `_persist_to_db`
+        runs later in the same call).
+        """
+        session = self.storage.get_session()
+        try:
+            repo_record = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+            if repo_record is None:
+                repo_record = RepositoryModel(name=repo_name, url=repo_url, file_count=0, symbol_count=0)
+                session.add(repo_record)
+                session.commit()
+            return repo_record.id
+        finally:
+            session.close()
+
     def index_directory(
         self,
         repo_path: str,
@@ -112,6 +153,16 @@ class IndexingEngine:
         Indexes all parseable files within a repository directory.
         """
         repo_path = os.path.abspath(repo_path)
+        resolved_repo_url = repo_url or repo_path
+
+        # Phase 0.6: resolve the real repo_id BEFORE parsing/chunking, so
+        # every in-memory BM25/vector document created below can be tagged
+        # with it (required for repository-scoped search -- see
+        # _resolve_repo_id's docstring for why this can't wait until the
+        # final DB persist step, which happens after these in-memory
+        # structures are already populated).
+        repo_id = self._resolve_repo_id(repo_name, resolved_repo_url)
+
         all_files: list[str] = []
 
         # 1. Discover all source code files
@@ -174,7 +225,13 @@ class IndexingEngine:
         )
 
         # 3. Build Call Graph
-        self.call_graph = CallGraphBuilder(parsed_files)
+        # Phase 0.6: stored per-repo (call_graphs) so a previously indexed
+        # repository's graph isn't discarded/overwritten by this run --
+        # `call_graph` is kept in sync as a "most recently indexed" alias
+        # for existing callers that are out of this milestone's scope.
+        repo_call_graph = CallGraphBuilder(parsed_files)
+        self.call_graphs[repo_id] = repo_call_graph
+        self.call_graph = repo_call_graph
 
         # 4. Generate Embeddings & Populate Vector Index
         #
@@ -207,9 +264,16 @@ class IndexingEngine:
                 doc_ids = []
                 metadatas = []
                 for idx, c in enumerate(all_chunks):
-                    doc_id = f"{c.file_path}::{c.symbol_name}::{c.chunk_index}"
+                    # Phase 0.6: doc_id is repo-qualified and metadata carries
+                    # an explicit repo_id -- without this, two repositories
+                    # indexing files at the same relative path (a realistic,
+                    # explicitly-tested scenario) would collide in this
+                    # shared in-memory vector index instead of staying
+                    # isolated.
+                    doc_id = f"{repo_id}::{c.file_path}::{c.symbol_name}::{c.chunk_index}"
                     doc_ids.append(doc_id)
                     metadatas.append({
+                        "repo_id": repo_id,
                         "symbol_name": c.symbol_name,
                         "file_path": c.file_path,
                         "chunk_type": c.chunk_type,
@@ -222,17 +286,22 @@ class IndexingEngine:
                 self.vector_index.add_batch(doc_ids, embeddings, metadatas)
 
         # 5. Populate BM25 Index
+        # Phase 0.6: doc_id is repo-qualified (same collision reasoning as
+        # the vector index above) and repo_id is threaded into the BM25
+        # metadata and symbol_repo_map so repository-scoped search can
+        # filter candidates without a second identity system.
         for sym in all_symbols:
-            doc_id = f"{sym.file_path}::{sym.name}"
+            doc_id = f"{repo_id}::{sym.file_path}::{sym.name}"
             self.symbols_by_id[doc_id] = sym
-            self.bm25_index.add_symbol(doc_id, sym)
+            self.symbol_repo_map[doc_id] = repo_id
+            self.bm25_index.add_symbol(doc_id, sym, repo_id=repo_id)
 
         self.bm25_index.build()
 
         # 6. Save to Database
         stats = self._persist_to_db(
             repo_name=repo_name,
-            repo_url=repo_url or repo_path,
+            repo_url=resolved_repo_url,
             parsed_files=parsed_files,
             all_symbols=all_symbols,
             all_chunks=all_chunks,
@@ -241,10 +310,11 @@ class IndexingEngine:
 
         return {
             "repository_name": repo_name,
+            "repository_id": repo_id,
             "total_files": len(parsed_files),
             "total_symbols": len(all_symbols),
             "total_chunks": len(all_chunks),
-            "call_graph_edges": len(self.call_graph.edges),
+            "call_graph_edges": len(repo_call_graph.edges),
             "embedding_status": "failed" if embedding_error else ("skipped_no_chunks" if not all_chunks else "success"),
             "embedding_error": embedding_error,
             "degraded_mode": embedding_error is not None,
@@ -556,10 +626,12 @@ class IndexingEngine:
 
         Repository scoping: only embeddings that belong to Symbols whose
         File belongs to the given `repo_url` are loaded, so embeddings from
-        one repository can never be hydrated into another's results (this
-        is not the same thing as Phase 0.6's repository-scoped *search* --
-        it only guarantees the persistence/hydration layer itself doesn't
-        mix repositories; `search()` remains global/unscoped, unchanged).
+        one repository can never be hydrated into another's results. Each
+        loaded vector's metadata is also tagged with `repo_id` (the same
+        `RepositoryModel.id` used everywhere else), which is what lets
+        `search(..., repository_id=...)` (Phase 0.6) filter hydrated
+        embeddings correctly even though `hydrate_all()` loads every
+        repository into the same shared `vector_index`.
 
         Vector-dimension safety: a persisted row whose `embedding_dim`
         doesn't match the currently configured `vector_index.dimension` is
@@ -604,10 +676,15 @@ class IndexingEngine:
                     skipped_dimension_mismatch += 1
                     continue
 
-                doc_id = f"{fm.path}::{sm.name}::{em.chunk_index}"
+                # Phase 0.6: repo-qualified doc_id + explicit repo_id in
+                # metadata, matching the scheme used at index time -- see
+                # index_directory's comment on why this prefix is needed to
+                # avoid collisions between repositories sharing a path.
+                doc_id = f"{repo_record.id}::{fm.path}::{sm.name}::{em.chunk_index}"
                 doc_ids.append(doc_id)
                 vectors.append(vec)
                 metadatas.append({
+                    "repo_id": repo_record.id,
                     "symbol_name": sm.name,
                     "file_path": fm.path,
                     "chunk_type": em.chunk_type,
@@ -667,29 +744,70 @@ class IndexingEngine:
         query: str,
         limit: int = 20,
         search_type: str = "hybrid",  # "keyword", "semantic", "hybrid"
+        repository_id: int | None = None,
     ) -> list[SearchResultItem]:
         """
-        Executes search across the indexed repository.
+        Executes search across the indexed repository/repositories.
+
+        Phase 0.6 -- repository-scoped search: when `repository_id` is
+        given, every candidate-generation step (BM25, vector, and the
+        call-graph-derived hybrid signal) is filtered to documents/symbols
+        tagged with that exact `repo_id` (the same `RepositoryModel.id`
+        used throughout the data model -- not a second identity system).
+        A search scoped to repository A can never return a result whose
+        ownership chain (repository -> file -> symbol -> chunk/embedding)
+        traces to a different repository, regardless of how well that
+        other repository's content happens to score against the query.
+
+        This filtering is enforced HERE, inside the search implementation
+        itself -- not left to a caller (REST/CLI/MCP) to post-filter -- and
+        happens BEFORE the result set is truncated to `limit`, so a
+        well-populated target repository is never starved of results just
+        because another repository's documents also scored highly.
+
+        When `repository_id` is None, behavior is byte-for-byte identical
+        to pre-Phase-0.6 search: fully global/unscoped across every
+        indexed/hydrated repository, exactly as before this milestone.
         """
+
+        def _repo_filter(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if repository_id is None:
+                return results
+            return [r for r in results if r.get("metadata", {}).get("repo_id") == repository_id]
+
         if search_type == "keyword":
-            bm25_res = self.bm25_index.search(query, top_k=limit)
+            # Scoped: pull every candidate so filtering can't starve the
+            # result set below `limit`; the ranker still truncates to
+            # `limit` at the end. Unscoped: unchanged (`top_k=limit`).
+            bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit
+            bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
             return self.ranker.fuse(query, bm25_results=bm25_res, vector_results=[], top_k=limit)
 
         elif search_type == "semantic":
+            vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit
             query_vec = self.embedder.encode(query)
-            vector_res = self.vector_index.search(query_vec, top_k=limit)
+            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool))
             return self.ranker.fuse(query, bm25_results=[], vector_results=vector_res, top_k=limit)
 
         else:  # hybrid
-            bm25_res = self.bm25_index.search(query, top_k=limit * 2)
-            query_vec = self.embedder.encode(query)
-            vector_res = self.vector_index.search(query_vec, top_k=limit * 2)
+            bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit * 2
+            vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit * 2
 
-            # Compute graph centrality / importance scores
+            bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
+            query_vec = self.embedder.encode(query)
+            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool))
+
+            # Compute graph centrality / importance scores, scoped to the
+            # requested repository's own call graph (self.call_graphs) so a
+            # symbol's caller count from a DIFFERENT repository's graph can
+            # never leak into this repository's score.
             graph_scores: dict[str, float] = {}
-            if self.call_graph:
+            graph = self.call_graphs.get(repository_id) if repository_id is not None else self.call_graph
+            if graph:
                 for doc_id, sym in self.symbols_by_id.items():
-                    callers = self.call_graph.reverse_adjacency.get((sym.file_path, sym.name), set())
+                    if repository_id is not None and self.symbol_repo_map.get(doc_id) != repository_id:
+                        continue
+                    callers = graph.reverse_adjacency.get((sym.file_path, sym.name), set())
                     # Normalized graph score (more callers = more important)
                     graph_scores[doc_id] = min(1.0, len(callers) / 5.0)
 

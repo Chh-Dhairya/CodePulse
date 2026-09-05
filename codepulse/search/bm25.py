@@ -33,8 +33,24 @@ class BM25Index:
         self.num_docs: int = 0
         self.avgdl: float = 0.0
 
-    def add_symbol(self, doc_id: str, symbol: Symbol, extra_text: str = "") -> None:
-        """Adds a Symbol to the BM25 index."""
+    def add_symbol(
+        self,
+        doc_id: str,
+        symbol: Symbol,
+        extra_text: str = "",
+        repo_id: int | None = None,
+    ) -> None:
+        """
+        Adds a Symbol to the BM25 index.
+
+        `repo_id` (Phase 0.6) is carried through into the document's
+        metadata so repository-scoped search can filter candidates by
+        owning repository without needing a second identity system --
+        it's the same `RepositoryModel.id` already used elsewhere.
+        Optional/None for backward compatibility with any caller that
+        doesn't track a repository (e.g. tests exercising this index
+        directly, unrelated to Phase 0.6).
+        """
         # Combine name, docstring, signature, and body snippet
         text_parts = [
             symbol.name * 3,  # Boost symbol name
@@ -53,6 +69,7 @@ class BM25Index:
             "signature": symbol.signature,
             "docstring": symbol.docstring,
             "language": symbol.language,
+            "repo_id": repo_id,
         })
 
     def add_document(self, doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
