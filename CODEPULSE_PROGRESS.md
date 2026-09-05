@@ -24,7 +24,7 @@ Phase 0.5 — Embedding Persistence + Hydration (verified COMPLETE)
 | Alembic migration infrastructure | IMPLEMENTED | 3/3 tests in `tests/test_migrations.py`; live `codepulse.db` confirmed stamped at initial revision | `4ccba7a` |
 | Phase 0.3 — Repository/File Upsert + content_hash | COMPLETE | 41/41 full suite passed; migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | `571a21d` |
 | Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` | COMPLETE | 49/49 full suite passed; migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | `e0b3ec0` |
-| Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed (49 pre-existing + 9 new: 7 embedding tests + 2 migration tests); migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed (49 pre-existing + 9 new: 7 embedding tests + 2 migration tests); migration verified non-destructive against a disposable copy, then applied to the real `codepulse.db` and re-verified | `50dbe22` |
 | Phase 0.6 — Repository-scoped search | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
@@ -96,7 +96,6 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 
 ## Current Risks
 
-- The Phase 0.5 code changes (schema, migration, embedder, engine logic, tests) are implemented, fully tested, and applied to the real `codepulse.db`, but **not yet committed to git** as of this update — see Exact Next Action. Do not assume they're committed without checking `git status`/`git log`.
 - `CodeEmbedder.encode()` now raises `EmbeddingUnavailableError` instead of ever returning a fallback vector. Any new caller of `.encode()` (or `IndexingEngine.search(search_type="semantic"/"hybrid")`, which calls it for the query) must be prepared for this exception — `search()` itself does NOT currently catch it, so a semantic/hybrid query while the model is unavailable will raise, not degrade gracefully. This wasn't in Phase 0.5's stated scope (which was about *indexing-time* embedding generation) but is worth flagging for whoever next touches the search path.
 - `_persist_to_db` now has four upsert blocks (repo/file/symbol/embedding) plus the dependency-insert block, all in one function/session — getting large. Phase 0.6 (repo-scoped search) shouldn't need to touch this function, but future phases extending persistence further should consider whether it's time to split it up (not done now, to avoid unrelated refactoring during a focused milestone).
 - Only `repositories`, `files`, `symbols`, `code_embeddings` are idempotent as of Phase 0.5; `dependencies` is not (Phase 3 scope) — do not assume the whole indexing pipeline is duplicate-free.
@@ -104,15 +103,14 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 ## Exact Next Action
 
 NEXT ACTION:
-Commit the Phase 0.5 working-tree changes (embedder, schema, migration `49572f834366`, engine logic, tests), then implement Phase 0.6 — Repository-scoped search (remove global singleton) according to the authoritative roadmap.
+Implement Phase 0.6 — Repository-scoped search (remove global singleton) according to the authoritative roadmap.
 
 ## Context Handoff Notes
 
-Phase 0.5 implementation is complete and verified in this session:
+Phase 0.5 implementation is complete, verified, and committed (`50dbe22`):
 
 - What was done: removed the silent pseudo-embedding fallback from `codepulse/embeddings/embedder.py`, replacing it with an explicit `EmbeddingUnavailableError`; added `chunk_index`/`content_hash`/`embedding_model`/`embedding_dim` columns + a `UniqueConstraint(symbol_id, chunk_type, chunk_index)` to `EmbeddingModel` (`codepulse/storage/db.py`); restructured `IndexingEngine.index_directory`/`_persist_to_db` (`codepulse/indexer/engine.py`) to link chunks back to their originating Symbol (`chunk_symbol_map`), catch embedding-generation failure explicitly (degraded mode, no fake vectors), and upsert Embedding rows by natural key after the Symbol upsert block; added `hydrate_repository`/`hydrate_all` methods, the latter called automatically from `__init__`; added Alembic migration `49572f834366` (chained after `3ba396e9c78f`) with a pre-flight duplicate check; added `tests/test_embedding_persistence.py` (7 new tests) and 2 new Phase 0.5 migration tests + 3 head-revision-literal fixes in `tests/test_migrations.py`.
 - What was verified: full suite 58/58 passed; Phase 0.5 migration verified non-destructive against a disposable copy of the real `codepulse.db`, then applied to the real `codepulse.db` itself and re-verified (revision `49572f834366`, all row counts unchanged: 1/18/128/528/0).
-- What remains: **committing this work to git** (not yet done as of this document update), then starting Phase 0.6.
-- Exact files changed this session (uncommitted at time of writing): `codepulse/embeddings/embedder.py`, `codepulse/indexer/engine.py`, `codepulse/storage/db.py`, `tests/test_migrations.py` (all modified); `alembic/versions/49572f834366_add_embedding_persistence_fields.py`, `tests/test_embedding_persistence.py` (both new); this file updated.
+- Committed as `50dbe22` (7 files changed: `codepulse/embeddings/embedder.py`, `codepulse/indexer/engine.py`, `codepulse/storage/db.py`, `tests/test_migrations.py` modified; `alembic/versions/49572f834366_add_embedding_persistence_fields.py`, `tests/test_embedding_persistence.py` new; this file updated).
 - Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 58 passed, 0 failed.
-- Exact next step: commit, then follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.6, starting with re-reading the roadmap's §15/§30 central-authorization-checkpoint framing (even though auth itself is Phase 1, the *scoping filter* on search is Phase 0.6).
+- Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.6, starting with re-reading the roadmap's §15/§30 central-authorization-checkpoint framing (even though auth itself is Phase 1, the *scoping filter* on search is Phase 0.6). Also worth noting for whoever starts 0.6: `IndexingEngine.search(search_type="semantic"/"hybrid")` does not currently catch `EmbeddingUnavailableError` for the query-side embed call (see Current Risks) — decide whether that's in 0.6's scope or a separate concern before touching `search()`.
