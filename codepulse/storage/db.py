@@ -147,6 +147,72 @@ class EmbeddingModel(Base):
     symbol = relationship("SymbolModel", back_populates="embeddings")
 
 
+class APIKeyModel(Base):
+    """
+    Phase 1.1 (roadmap §15, §37 item 1.1): API key model + hashing +
+    creation flow.
+
+    The raw key is NEVER stored -- only its SHA-256 hash (`key_hash`, see
+    codepulse.auth.hash_api_key) and a short, non-secret prefix
+    (`key_prefix`) kept purely for display/identification in a future
+    key-management UI/CLI. This is Phase 1.1 scope only: the model,
+    hashing, and a creation (+ verification-primitive) flow. Enforcing
+    this at the API boundary (a FastAPI dependency required on every
+    route) is Phase 1.2, deliberately not implemented here. Role-based
+    permissions (viewer/indexer/admin, roadmap §15) are Phase 7 (B25)
+    scope and are not modeled yet -- no `role` column exists on this table.
+    """
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        UniqueConstraint("key_hash", name="uq_api_keys_key_hash"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    # SHA-256 hex digest of the raw key (codepulse.auth.hash_api_key). A
+    # fast cryptographic hash (not a slow/salted password hash) is
+    # appropriate here because the input is already a high-entropy,
+    # randomly generated secret (codepulse.auth.generate_raw_api_key), not
+    # a user-chosen low-entropy password -- and a fast hash keeps
+    # lookup-by-hash a simple indexed equality query for Phase 1.2's
+    # authorization dependency.
+    key_hash = Column(String(64), nullable=False)
+    # Short, non-secret prefix of the raw key (e.g. "cpk_a1b2c3d4"), kept
+    # only so a key can be identified/distinguished in a future listing
+    # UI/CLI without ever re-displaying the secret itself.
+    key_prefix = Column(String(32), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Nullable revocation timestamp: schema support only in Phase 1.1 (so
+    # a later revocation milestone doesn't need its own migration) -- no
+    # revoke() flow is implemented yet; codepulse.auth.verify_api_key does
+    # respect this field defensively (a revoked key never verifies).
+    revoked_at = Column(DateTime, nullable=True)
+
+    repositories = relationship(
+        "APIKeyRepositoryModel", back_populates="api_key", cascade="all, delete-orphan"
+    )
+
+
+class APIKeyRepositoryModel(Base):
+    """
+    Scopes an APIKey to a specific repository (roadmap §15: "API keys
+    (hashed at rest, scoped to one or more repositories)"). One row per
+    (api_key, repository) pair a key is permitted to access. This table
+    only records the grant -- Phase 1.1 does not read or enforce it
+    anywhere; that's Phase 1.2's central authorization dependency.
+    """
+    __tablename__ = "api_key_repositories"
+    __table_args__ = (
+        UniqueConstraint("api_key_id", "repo_id", name="uq_api_key_repositories_key_repo"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    api_key_id = Column(Integer, ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False)
+    repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+
+    api_key = relationship("APIKeyModel", back_populates="repositories")
+
+
 class StorageManager:
     """Manages database connection, tables, and session lifecycle."""
 

@@ -75,12 +75,14 @@ def test_fresh_database_migration_scenario_1():
             "symbols",
             "dependencies",
             "code_embeddings",
+            "api_keys",
+            "api_key_repositories",
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the Phase 0.5 migration)
+        # Verify revision recorded (head now includes the Phase 1.1 migration)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "49572f834366"
+        assert current_rev == "b0bdd63949f4"
 
         # Verify columns on symbols table
         symbol_cols = {col["name"]: col for col in insp.get_columns("symbols")}
@@ -126,6 +128,25 @@ def test_fresh_database_migration_scenario_1():
             set(uc["column_names"]) == {"symbol_id", "chunk_type", "chunk_index"}
             for uc in embedding_uniques
         ), f"Expected a UNIQUE(symbol_id, chunk_type, chunk_index) constraint on code_embeddings, got: {embedding_uniques}"
+
+        # Verify Phase 1.1 api_keys / api_key_repositories tables
+        api_key_cols = {col["name"]: col for col in insp.get_columns("api_keys")}
+        for expected_col in ("name", "key_hash", "key_prefix", "created_at", "revoked_at"):
+            assert expected_col in api_key_cols, f"Missing api_keys.{expected_col}"
+
+        api_key_uniques = insp.get_unique_constraints("api_keys")
+        assert any(
+            uc["column_names"] == ["key_hash"] for uc in api_key_uniques
+        ), f"Expected a UNIQUE(key_hash) constraint on api_keys, got: {api_key_uniques}"
+
+        api_key_repo_cols = {col["name"]: col for col in insp.get_columns("api_key_repositories")}
+        for expected_col in ("api_key_id", "repo_id"):
+            assert expected_col in api_key_repo_cols, f"Missing api_key_repositories.{expected_col}"
+
+        api_key_repo_uniques = insp.get_unique_constraints("api_key_repositories")
+        assert any(
+            set(uc["column_names"]) == {"api_key_id", "repo_id"} for uc in api_key_repo_uniques
+        ), f"Expected a UNIQUE(api_key_id, repo_id) constraint on api_key_repositories, got: {api_key_repo_uniques}"
 
         # 3. Verify application connects and operates on migrated database
         storage = StorageManager(db_url=db_url)
@@ -197,7 +218,7 @@ def test_existing_database_stamping_scenario_2():
 
         # Verify alembic_version is now recorded
         current_rev = get_current_revision(db_url)
-        assert current_rev == "49572f834366"
+        assert current_rev == "b0bdd63949f4"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
@@ -585,8 +606,10 @@ def test_phase_0_5_migration_preserves_data_and_adds_embedding_fields():
             )
             conn.commit()
 
-        # 2. Upgrade to the new head.
-        run_migrations(db_url=db_url, revision="head")
+        # 2. Upgrade to the Phase 0.5 revision specifically (not generic
+        #    "head" -- this test targets that one migration step in
+        #    isolation, and must keep doing so as later migrations are added).
+        run_migrations(db_url=db_url, revision="49572f834366")
         assert get_current_revision(db_url) == "49572f834366"
 
         # 3. Pre-existing data preserved untouched.
@@ -698,6 +721,112 @@ def test_phase_0_5_migration_refuses_to_apply_over_duplicate_data():
         # The database must remain at the old revision -- migration aborted,
         # nothing silently half-applied.
         assert get_current_revision(db_url) == "3ba396e9c78f"
+
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_phase_1_1_migration_preserves_data_and_adds_api_key_tables():
+    """
+    SCENARIO 6 (Phase 1.1) — Upgrading a pre-Phase-1.1 database:
+    1. Build a database at the Phase 0.5 head (49572f834366, no api_keys/
+       api_key_repositories tables yet) and populate it with data,
+       simulating a real post-Phase-0.9/0.10 codepulse.db state.
+    2. Upgrade to the new head (b0bdd63949f4).
+    3. Verify all pre-existing rows are preserved untouched.
+    4. Verify the new `api_keys`/`api_key_repositories` tables exist with
+       the expected columns/constraints and are genuinely usable (a real
+       insert succeeds; a duplicate key_hash is rejected).
+
+    Unlike prior phases' migrations, this one only CREATES new tables --
+    it does not alter any existing table -- so there is no pre-existing-
+    duplicate-data failure mode to test here (see the migration's own
+    docstring).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        # 1. Build the Phase 0.5 schema and seed data.
+        run_migrations(db_url=db_url, revision="49572f834366")
+        assert get_current_revision(db_url) == "49572f834366"
+
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                    "VALUES (1, 1, 'phase05_repo', 'file:///phase05/path', 1, 1)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO files (id, repo_id, path, language, size_bytes, line_count, content_hash) "
+                    "VALUES (1, 1, 'main.py', 'python', 42, 5, 'deadbeef')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language, body_hash) "
+                    "VALUES (1, 1, 'existing_func', 'function', 1, 5, 'python', 'abc123')"
+                )
+            )
+            conn.commit()
+
+        # 2. Upgrade to the Phase 1.1 revision specifically (not generic
+        #    "head" -- this test targets that one migration step in
+        #    isolation, and must keep doing so as later migrations are added).
+        run_migrations(db_url=db_url, revision="b0bdd63949f4")
+        assert get_current_revision(db_url) == "b0bdd63949f4"
+
+        # 3. Pre-existing data preserved untouched.
+        with engine.connect() as conn:
+            repo_count = conn.execute(text("SELECT count(*) FROM repositories")).scalar()
+            file_count = conn.execute(text("SELECT count(*) FROM files")).scalar()
+            symbol_count = conn.execute(text("SELECT count(*) FROM symbols")).scalar()
+            assert (repo_count, file_count, symbol_count) == (1, 1, 1)
+
+        # 4. New tables exist, are correctly shaped, and are genuinely usable.
+        insp = inspect(engine)
+        assert "api_keys" in insp.get_table_names()
+        assert "api_key_repositories" in insp.get_table_names()
+
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at) "
+                    "VALUES (1, 'test-key', :h, 'cpk_aaaaaaaa', :ts)"
+                ),
+                {"h": "a" * 64, "ts": "2026-01-01 00:00:00"},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO api_key_repositories (id, api_key_id, repo_id) VALUES (1, 1, 1)"
+                )
+            )
+            conn.commit()
+
+            # Duplicate key_hash must be rejected at the DB level.
+            with pytest.raises(Exception):
+                conn.execute(
+                    text(
+                        "INSERT INTO api_keys (name, key_hash, key_prefix, created_at) "
+                        "VALUES ('dup', :h, 'cpk_bbbbbbbb', :ts)"
+                    ),
+                    {"h": "a" * 64, "ts": "2026-01-01 00:00:00"},
+                )
+                conn.commit()
 
     finally:
         if engine is not None:
