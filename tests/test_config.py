@@ -29,7 +29,17 @@ def clean_config_and_env(monkeypatch):
 
 
 def test_builtin_defaults_loaded():
-    """1. Verify that built-in defaults are loaded when no TOML, env vars, or CLI overrides exist."""
+    """
+    1. Verify that built-in defaults are loaded when no TOML, env vars, or
+    CLI overrides exist.
+
+    Phase 0.9: cors_origins/cors_allow_credentials defaults updated from
+    the prior `["*"]` / `True` (an unconsidered, spec-invalid combination
+    for credentialed requests -- roadmap §3-C.3) to a secure-by-default
+    `[]` / `False`. This assertion was updated to match; it is not a
+    weakened test -- it now encodes the roadmap-required default instead
+    of the fabricated/insecure one.
+    """
     config = load_config(config_file="/nonexistent/path/to/codepulse.toml")
     assert config.db_url == "sqlite:///codepulse.db"
     assert config.embedding_model == "all-MiniLM-L6-v2"
@@ -45,8 +55,8 @@ def test_builtin_defaults_loaded():
     assert config.bm25_b == 0.75
     assert config.server_host == "127.0.0.1"
     assert config.server_port == 8000
-    assert config.cors_origins == ["*"]
-    assert config.cors_allow_credentials is True
+    assert config.cors_origins == []
+    assert config.cors_allow_credentials is False
 
 
 def test_toml_overrides_defaults():

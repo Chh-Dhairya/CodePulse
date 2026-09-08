@@ -2,7 +2,7 @@
 
 ## Last Updated
 
-2026-09-05
+2026-09-08
 
 ## Current Phase
 
@@ -10,11 +10,11 @@ Phase 0 — Foundation / Correctness
 
 ## Current Milestone
 
-None actively in progress. Awaiting start of Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `rich`; delete shipped `codepulse.db`; git init (git init already done in a prior phase).
+None actively in progress. Awaiting start of Phase 0.10 — Restart-survivability + idempotency test suite.
 
 ## Last Completed Milestone
 
-Phase 0.8 — `.gitignore`/`.codepulseignore` discovery and ignore-rule handling (verified COMPLETE)
+Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `rich` (verified COMPLETE)
 
 ## Completed Milestones
 
@@ -27,64 +27,70 @@ Phase 0.8 — `.gitignore`/`.codepulseignore` discovery and ignore-rule handling
 | Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed; migration applied to real `codepulse.db` | `50dbe22` |
 | Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed; no migration required | `aea7518` |
 | Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed; no migration required | `704c41d` |
-| Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | COMPLETE | 86/86 full suite passed (74 pre-existing + 12 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | `b27381a` |
-| Phase 0.9 — CORS/pyproject/rich cleanup | NOT IMPLEMENTED | — | — |
+| Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | COMPLETE | 86/86 full suite passed; no migration required | `b27381a` |
+| Phase 0.9 — CORS defaults + `pyproject.toml` trim + `rich` | COMPLETE | 95/95 full suite passed (86 pre-existing + 9 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.10 — Restart-survivability + idempotency test suite | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
 
 ## Current Implementation State
 
-- **Ignore-rule handling is now implemented (Phase 0.8).** New module `codepulse/indexer/ignore.py` (`RepositoryIgnoreRules`) loads a repository's root-level `.gitignore` and `.codepulseignore` files once per `index_directory()` call and answers `is_ignored(rel_path, is_dir)` for every discovered path, using the real `pathspec` library (`gitignore`/gitwildmatch pattern semantics — negation, `**` globs, directory-only trailing-slash patterns, standard precedence) rather than a hand-rolled matcher.
-- **Exact semantics implemented (see `ignore.py`'s module docstring for the full rationale):**
-  - `.gitignore`: standard gitignore pattern syntax, root-level only.
-  - `.codepulseignore`: same syntax, **additive** to `.gitignore` ("beyond git's own," per roadmap §16) — not an override/replacement.
-  - The two files are evaluated **independently**; a path is excluded if *either* file's own ruleset matches it (each file's negations only resolve within that same file — a negation in one file cannot reach across and un-ignore something the other file excludes).
-  - **Root-only, no nested/per-directory ignore files** — a documented, deliberate limitation (the roadmap doesn't call for git's full nested-ignore-file behavior, and it's materially more scope than "respect the repo's ignore rules").
-  - Absent ignore file → empty ruleset, no error.
-  - Present-but-unreadable or present-but-unparseable ignore file → that file's ruleset is treated as empty, a warning is logged (file name + error), indexing proceeds rather than aborting.
-  - `.gitignore`/`.codepulseignore` themselves are never indexed — not because of new special-case logic, but because no `LanguageParser` recognizes them (a pre-existing fact of `parser/factory.py`'s extension dispatch), now explicitly asserted by a test.
-- **Discovery integration point:** `IndexingEngine.index_directory()`, step 1 (`codepulse/indexer/engine.py`). `RepositoryIgnoreRules` is constructed **once** per call (not stored on `self` — no shared/global state between repositories) and layered on top of the pre-existing hardcoded `IGNORE_DIRS`/`IGNORE_EXTENSIONS` filtering (both unchanged, still checked first as a cheap short-circuit). Ignored directories are **pruned** from `os.walk`'s `dirs` list in place (matching the pre-existing pruning mechanism for `IGNORE_DIRS`), so nothing beneath an ignored directory is walked, read, or parsed — not merely filtered out afterward. Ignore filtering happens entirely within step 1, before step 2 (parsing) even begins, so an ignored file is never opened, read, parsed, chunked, embedded, or persisted.
-- **Ignored files create zero downstream artifacts** for that indexing run: no `FileModel` row, no `SymbolModel` row, no `EmbeddingModel` row, no BM25/vector-index entry, no call-graph entry — verified directly (DB queries + in-memory index inspection + a real search-miss check), not inferred.
-- **Re-indexing / stale-data limitation (deliberately NOT implemented):** if a file was indexed in a *previous* run and later becomes newly ignored (a new `.gitignore` line added, etc.), its existing `FileModel`/`SymbolModel`/`EmbeddingModel` rows from the prior run are **NOT deleted or cleaned up** by this milestone. Phase 0.8 only affects *discovery for new indexing operations* — it does not implement stale-data cleanup for previously-indexed-now-ignored files. This matches the roadmap's own framing (`ON DELETE CASCADE`-based stale-data cleanup is explicitly Phase 3 territory) and this session's explicit instruction not to invent that system now. **This is a real, user-visible limitation**: re-indexing a repository after adding a new ignore rule will not retroactively remove already-indexed rows for now-ignored files.
-- Paths: ignore-matching uses the exact same `os.path.relpath(path, repo_path).replace("\\", "/")` convention already established elsewhere in the pipeline for `FileParseResult.file_path`/`Symbol.file_path`/DB storage — no new path-normalization scheme was introduced, and no existing stored path format changed.
-- New runtime dependency: `pathspec>=1.1.0,<1.2.0` (added to `pyproject.toml`) — a small, standard, pure-Python library for gitignore-pattern matching (used by many major Python tools). Chosen over hand-rolling gitignore semantics (order-dependent negation, `**`, directory-only patterns) because "same syntax" (§16) means *real* gitignore behavior is expected, and a well-tested library is lower-risk than a bespoke matcher for a famously fiddly spec.
-- No file-size or file-type caps were implemented (§8 mentions them alongside ignore-file handling, but they're a distinct, not-yet-built concern, out of this milestone's scope).
+- **CORS policy is now secure by default (Phase 0.9).** `CodePulseConfig.cors_origins` default changed from `["*"]` to `[]` (deny all cross-origin browser requests by default); `cors_allow_credentials` default changed from `True` to `False`. This directly fixes the exact misconfiguration the roadmap flagged (§3-C.3): `allow_origins=["*"]` combined with `allow_credentials=True` is not just an "unconsidered default" but a combination browsers themselves reject for credentialed requests, per the CORS spec.
+- **A new `@model_validator` on `CodePulseConfig` permanently rejects the invalid combination** (`"*"` in `cors_origins` together with `cors_allow_credentials=True`), raising a clear `ValidationError` — this guards the *setting itself*, not just its default, so a future TOML/env override can't silently reintroduce the exact flagged misconfiguration. A non-credentialed wildcard (`cors_origins=["*"]`, `cors_allow_credentials=False`) remains a legal, permissive-but-valid configuration.
+- **The existing Phase 0.1 configuration system was reused unchanged** — no new config mechanism, no new precedence layer. `cors_origins`/`cors_allow_credentials` were already wired through `CLI > env (CODEPULSE_CORS_ORIGINS/CODEPULSE_CORS_ALLOW_CREDENTIALS) > TOML ([server] section) > defaults`; only the *default* values (and the new validator) changed. Anyone who needs browser-based cross-origin access (e.g. a future Web UI) configures specific origin(s) through this same, already-established system.
+- **`rich` is now an explicit declared dependency** (`pyproject.toml`) — it was already used throughout `codepulse/cli.py` (Console, Panel, Progress, Table, Tree, Syntax) but was never declared; the CLI only worked because `rich` happened to already be present in the dev `.venv` transitively. **No new CLI integration was added** — the roadmap's own audit note (§3-C.2) is exactly "declared but not imported anywhere in the manifest," not "not used at all," so declaring it was the entire fix. `cli.py` itself is unchanged.
+- **`pyproject.toml` dependency trim, exactly matching the roadmap's explicit instruction (§34 migration table):** removed `redis`, `pgvector`, `psycopg[binary]` (none imported anywhere in `codepulse/`, `tests/`, or `alembic/` — confirmed by repository-wide search; none were even installed in the dev `.venv`, so this has zero effect on the current environment and only changes what a fresh `pip install -e .` pulls in going forward). `alembic` was **kept** (the roadmap's own conditional — "alembic-if-unused-still" — no longer applies; it's been genuinely used since Phase 0.2). `tantivy` was **kept** despite being currently unused, per the roadmap's own explicit instruction ("keep tantivy, finally use it") — it's earmarked for Phase 2's lexical-index replacement, not a Phase 0.9 removal target.
+- **`prometheus-client`, `httpx`, `structlog` were deliberately left untouched** — none appear in the roadmap's explicit Phase 0.9 removal list (only `redis`/`pgvector`/`psycopg[binary]` are named), so removing them would have been unrequested dependency modernization beyond this milestone's scope. `httpx` is a genuine transitive runtime requirement of FastAPI's `TestClient` today; `prometheus-client`/`structlog` remain declared-but-unused, to be activated in Phase 7.
+- `pip check` reports no broken requirements after the trim; `redis`/`psycopg`/`pgvector` were confirmed absent from the dev `.venv` (never installed), and `rich` confirmed already installed and working (version 15.0.0, matching the pin added).
+
+## CORS Behavior — Before / After
+
+| | Before (pre-0.9) | After (Phase 0.9) |
+|---|---|---|
+| `cors_origins` default | `["*"]` | `[]` (deny all by default) |
+| `cors_allow_credentials` default | `True` | `False` |
+| Wildcard + credentials together | Allowed to be configured (spec-invalid, silently broken for credentialed requests) | **Rejected at config load** with a clear `ValidationError`, regardless of how it's set (default, TOML, env, or CLI) |
+| Configuration mechanism | Phase 0.1 config system (`CLI > env > TOML > defaults`) | **Unchanged** — same mechanism, only defaults + validation changed |
+
+**Compatibility impact:** any deployment that was implicitly relying on the old wildcard-open default (e.g., calling the API cross-origin from an arbitrary browser page without ever setting `cors_origins`) will now see CORS-blocked requests until `cors_origins` is explicitly configured. This is the intended, security-motivated behavior change the roadmap calls for, not an accidental regression. No API endpoint, payload, or route changed.
 
 ## Database State
 
 - `codepulse.db` exists at the repository root, untracked by git.
-- **Current Alembic revision (real `codepulse.db`): `49572f834366`** — **unchanged by Phase 0.8**. No migration was created or needed: ignore-rule handling is a discovery-time filter, not a schema concern.
+- **Current Alembic revision (real `codepulse.db`): `49572f834366`** — **unchanged by Phase 0.9**. No migration was created or needed: CORS defaults, dependency trimming, and declaring `rich` are not schema concerns.
 - Row counts (unchanged since Phase 0.3, re-verified this session): `repositories` = 1, `files` = 18, `symbols` = 128, `dependencies` = 528, `code_embeddings` = 0.
-- The real `codepulse.db` was **not modified** during Phase 0.8. All verification used temporary, disposable SQLite databases and temporary repository directories under `tmp_path`; the real DB's revision and row counts were re-checked identical before and after the full test run.
+- The real `codepulse.db` was **not modified** during Phase 0.9. No test indexed anything or wrote to it; all CORS tests use either the real (already-constructed, read-only-from-a-DB-perspective) API app or a lightweight standalone FastAPI app with no database at all.
 
 ## Test State
 
-- Last full suite result: **86 passed, 0 failed, 13 warnings** (`.venv/Scripts/python.exe -m pytest tests/ -v`), ~157s.
-- Focused Phase 0.8 tests: `tests/test_ignore_discovery.py` (12 tests, exercising the real `IndexingEngine.index_directory()`/`.search()` pipeline end-to-end against temp repos/DBs, real embedding model via a module-scoped shared `CodeEmbedder`): no ignore files (baseline); `.gitignore` excludes a file; `.gitignore` excludes a directory and everything nested beneath it; `.codepulseignore` excludes a file and a directory; combined `.gitignore` + `.codepulseignore` (proves additive union, not override); pattern matches a nested (non-root) path; negation pattern re-includes a file standard gitignore syntax requires; an ignored file produces no `FileModel`/`SymbolModel` rows, no BM25/vector-index entry, and no search hit for content unique to it; two repositories indexed by the same engine instance have fully independent ignore rules (no shared/global state); `.gitignore`/`.codepulseignore` themselves are never indexed; a malformed pattern (`[z-a]`, verified directly against `pathspec` to actually raise) does not crash indexing and the rest of the repo still indexes correctly; a `RepositoryIgnoreRules` unit-level sanity check for the no-ignore-files case.
-- All 74 pre-existing tests re-run unchanged and pass, confirming no regression to Phase 0.3–0.7 behavior (upsert idempotency, embedding persistence/hydration, no pseudo-embedding fallback, repository-scoped search, fabricated-metric removal).
+- Last full suite result: **95 passed, 0 failed, 13 warnings** (`.venv/Scripts/python.exe -m pytest tests/ -v`), ~145s.
+- Focused Phase 0.9 tests: `tests/test_cors.py` (9 new tests, verifying real HTTP response headers, not source constants): default policy denies all origins (both a plain GET and an OPTIONS preflight against the real running app); default response carries no `access-control-allow-credentials` header; a configured specific origin is allowed (header echoes it back); a non-configured origin is denied; credentials header present/absent correctly tracking the configured flag; the wildcard+credentials combination raises `ValidationError` at config construction; a non-credentialed wildcard remains valid and is honored.
+- `tests/test_config.py::test_builtin_defaults_loaded` updated (2 assertions: `cors_origins == []`, `cors_allow_credentials is False`) with the change documented in the test's own docstring — this is the one existing test that encoded the old insecure defaults; not a weakened test, it now asserts the roadmap-required secure default. All other `test_config.py` tests were already testing explicit overrides (TOML/env), unaffected by the default change, and pass unchanged.
+- All other pre-existing tests re-run unchanged and pass, confirming no regression to Phase 0.3-0.8 behavior.
 - No test was weakened, skipped, or deleted.
-- Known warnings: `StarletteDeprecationWarning` (httpx/TestClient) and `FutureWarning`s from `tree_sitter` — pre-existing, not addressed. (A `pathspec` `DeprecationWarning` for the `"gitwildmatch"` factory name was hit during development and fixed by switching to the non-deprecated `"gitignore"` factory name before finalizing — not present in the final result.)
+- Known warnings: `StarletteDeprecationWarning` (httpx/TestClient) and `FutureWarning`s from `tree_sitter` — pre-existing, not addressed.
 
 ## Known Issues
 
 **Roadmap work remaining (Phase 0, not yet implemented):**
-- 0.9 Fix CORS policy defaults; trim `pyproject.toml`; add `rich`
-- 0.10 Restart-survivability + idempotency test suite (beyond what 0.3-0.8's own focused tests cover)
+- 0.10 Restart-survivability + idempotency test suite (beyond what 0.3-0.9's own focused tests cover)
 
 **Known technical debt:**
 - `StorageManager.create_tables()` still unconditionally calls `Base.metadata.create_all()` alongside Alembic.
 - `SymbolType.VARIABLE` / `SymbolType.INTERFACE` enum values defined but never produced by either parser.
 - Dead/unused `job_id` generation in `api/app.py` — Phase 1 (`IndexJob`) scope.
 - Dependency (call graph edge) rows still duplicate on every re-index (Phase 3 scope).
-- `languages` breakdown (`get_repository_stats`) and the "repo not found" fallback counts (`get_index_status`) are not repository-scoped (discovered in Phase 0.7's audit, not fabrication, still unfixed).
+- `languages` breakdown (`get_repository_stats`) and the "repo not found" fallback counts (`get_index_status`) are not repository-scoped (Phase 0.7 finding, still unfixed).
 - `BM25Index`/`CallGraphBuilder` are still in-memory-only with no durable backing.
 - `IndexingEngine.search(search_type="semantic"/"hybrid")` still does not catch `EmbeddingUnavailableError` for the query-side embed call.
 - No `/health/live` or `/health/ready` endpoint exists yet.
-- **New from Phase 0.8: no stale-data cleanup for previously-indexed files that become newly ignored** — see "Re-indexing / stale-data limitation" above. A repository re-indexed after its ignore rules change will retain database rows for files that are now ignored, until a future (Phase 3-adjacent) stale-data-cleanup milestone addresses it.
-- **New from Phase 0.8: no nested/per-directory `.gitignore`/`.codepulseignore` support** — only the repository-root files are read. A `.gitignore` in a subdirectory is not consulted (this differs from real git's own behavior, which does support nested ignore files) — a deliberate scope-limiting decision, documented in `codepulse/indexer/ignore.py`.
-- **New from Phase 0.8: no file-size or file-type caps** — mentioned alongside ignore-file handling in roadmap §8 but not implemented; a distinct future concern.
+- No stale-data cleanup for previously-indexed files that become newly ignored (Phase 0.8 finding).
+- No nested/per-directory `.gitignore`/`.codepulseignore` support (Phase 0.8 finding).
+- No file-size or file-type caps (Phase 0.8 finding).
+- **New from Phase 0.9:** `prometheus-client` and `structlog` remain declared in `pyproject.toml` but genuinely unused anywhere in the codebase — deliberately not removed (not in the roadmap's explicit Phase 0.9 removal list) and not yet activated (that's Phase 7's observability wiring). Anyone auditing "declared vs. actually used" dependencies should expect these two specifically until Phase 7.
+- **New from Phase 0.9:** no `/health/ready` endpoint exists to report "DB reachable, embedding model loaded, index storage writable" as described in roadmap §18 — unrelated to CORS/dependencies but worth noting since Phase 0.9 touched the API app's middleware setup; not built here (Phase 7 scope, deliberately not opportunistically added).
 
-**Blockers:** none currently known for starting Phase 0.9.
+**Blockers:** none currently known for starting Phase 0.10.
 
 ## Deferred Work
 
@@ -93,33 +99,33 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 - Kubernetes, Redis, distributed workers, microservices
 - Enterprise SSO, full organization/user tenancy
 - Learned/adaptive ranking, LLM reranking, LLM-generated explanations as source of truth
-- PostgreSQL/pgvector, Tantivy-backed lexical index, embedded ANN vector index (Phase 2)
+- PostgreSQL/pgvector, Tantivy-backed lexical index (finally *using* the already-kept `tantivy` dependency), embedded ANN vector index (Phase 2)
 - `RepositorySnapshot`, `IndexJob`, `APIKey`, authentication/authorization, real `SearchFeedback` persistence (Phase 1/3)
 - Call-graph confidence scoring, impact-analysis depth bucketing, module clustering, stale-data cleanup for newly-ignored files (Phase 3/4)
 - MCP server (Phase 5)
 - VS Code extension, Web UI (Phase 6)
-- Observability infrastructure (Phase 7)
-- Default-exclusion of secret-shaped filenames (`.env*`, `*.pem`, `*.key`, `id_rsa*`) with an opt-in override flag, and lockfile/minified-bundle detection beyond the existing `IGNORE_DIRS`/`IGNORE_EXTENSIONS` sets — both mentioned in roadmap §16 alongside `.gitignore`/`.codepulseignore` support, but not part of B6's narrow definition of done ("ignored files never appear in the index") and not implemented in Phase 0.8; flagged here as a plausible future near-term item, not assumed to be required.
+- Observability infrastructure (`structlog`/`prometheus-client` activation, health endpoints) — Phase 7
 
 ## Current Risks
 
-- `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 0.8.
+- `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 0.9.
 - The `languages`/fallback-counts repository-isolation gap (Phase 0.7 finding) remains unfixed.
 - Only `repositories`, `files`, `symbols`, `code_embeddings` are idempotent; `dependencies` is not (Phase 3 scope).
-- Anyone relying on ignore rules to *retroactively* remove already-indexed secrets/noise from the database should be aware Phase 0.8 only prevents *new* indexing of ignored files — it does not purge rows from before the ignore rule existed (see Known Issues).
+- Any external tooling/scripts that assumed the old wildcard-open CORS default (calling the API cross-origin from a browser without configuring `cors_origins`) will now be blocked until `cors_origins` is explicitly configured — this is intentional (see CORS Behavior table above), but worth flagging for whoever operates a deployment across this change.
 
 ## Exact Next Action
 
 NEXT ACTION:
-Implement Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `rich`, according to the authoritative roadmap (`codepulse/config.py`'s `cors_origins`/`cors_allow_credentials` defaults are still permissive `["*"]`/`True`; `pyproject.toml` still declares unused `psycopg[binary]`, `pgvector`, `tantivy`, `redis`; `cli.py` imports `rich`, which is still undeclared as a dependency).
+Implement Phase 0.10 — Restart-survivability + idempotency test suite, according to the authoritative roadmap (roadmap §20 "Restart tests: index → kill process → restart → search must return the same results," and the Phase 0 Definition of Done: "indexing the same repo twice produces zero duplicate rows; killing and restarting the server preserves semantic search results; no endpoint returns a hardcoded number" — the first two clauses are individually exercised by existing Phase 0.3-0.5 focused tests already, but Phase 0.10 is the roadmap's own explicit milestone for a dedicated suite proving this end-to-end, beyond what any single prior phase's tests cover in isolation).
 
 ## Context Handoff Notes
 
-Phase 0.8 implementation is complete, verified, and committed (`b27381a`):
+Phase 0.9 implementation is complete and verified in this session:
 
-- What was done: audited the complete discovery pipeline first (confirmed `os.walk`-based discovery in `IndexingEngine.index_directory` step 1, with pre-existing `IGNORE_DIRS`/`IGNORE_EXTENSIONS` hardcoded filtering and directory-pruning already in place, and confirmed no `.gitignore`/`.codepulseignore` support existed at all); added `codepulse/indexer/ignore.py` (`RepositoryIgnoreRules`, built on the real `pathspec` library); integrated it into step 1's `os.walk` loop (directory pruning + file filtering, layered on top of the existing hardcoded sets); added `pathspec>=1.1.0,<1.2.0` to `pyproject.toml`; added `tests/test_ignore_discovery.py` (12 new tests against the real indexing pipeline).
-- What was verified: full suite 86/86 passed (re-confirmed again at commit time); real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
+- What was done: audited CORS wiring (confirmed already routed through the Phase 0.1 config system, `allow_origins=["*"]` + `allow_credentials=True` default confirmed as the exact flagged invalid/insecure combination), pyproject.toml's complete dependency list, and rich's actual usage in `cli.py` (already used, never declared) before making any change. Changed `CodePulseConfig.cors_origins` default to `[]` and `cors_allow_credentials` default to `False`; added a `@model_validator` rejecting the wildcard+credentials combination permanently (not just by default); removed `redis`/`pgvector`/`psycopg[binary]` from `pyproject.toml` (confirmed unused and not even installed); kept `alembic`/`tantivy` per the roadmap's explicit instruction; added `rich>=15.0.0,<16.0.0` as an explicit dependency (no CLI code changes); added `tests/test_cors.py` (9 new tests against real HTTP response headers); updated `tests/test_config.py`'s one affected default-value assertion with the change documented in its own docstring.
+- What was verified: full suite 95/95 passed; `pip check` clean; `redis`/`psycopg`/`pgvector` confirmed absent from the dev `.venv` (never installed, zero environment impact); real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
 - No Alembic migration was created (none needed).
-- Committed as `b27381a` (5 files changed: `codepulse/indexer/engine.py`, `pyproject.toml` modified; `codepulse/indexer/ignore.py`, `tests/test_ignore_discovery.py` new; this file updated).
-- Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 86 passed, 0 failed.
-- Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.9, starting with re-reading roadmap sprint item 0.9 ("Fix CORS policy; trim pyproject.toml; add rich; delete committed codepulse.db; git init" — note git init and codepulse.db-never-committed are already satisfied from earlier phases, so 0.9's remaining real work is CORS defaults + dependency trimming + declaring `rich`).
+- What remains: **committing this work to git** (not yet done as of this document update — the user's instructions for this milestone explicitly said not to commit), then starting Phase 0.10.
+- Exact files changed this session (uncommitted at time of writing): `codepulse/config.py`, `pyproject.toml`, `tests/test_config.py` (all modified); `tests/test_cors.py` (new); this file updated.
+- Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 95 passed, 0 failed.
+- Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.10, starting with re-reading roadmap §20's "Restart tests" and the Phase 0 Definition of Done, and identifying exactly which restart/idempotency scenarios are NOT already covered by existing Phase 0.3-0.5 focused tests before designing new ones (to avoid duplicating coverage that already exists).

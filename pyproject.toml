@@ -11,17 +11,18 @@ dependencies = [
     "pydantic>=2.7.0,<2.8.0",
     "pydantic-settings>=2.3.0,<2.4.0",
 
-    # Relational & Vector Storage
-    "psycopg[binary]>=3.1.19,<3.2.0",
-    "pgvector>=0.3.1,<0.4.0",
+    # Storage (Phase 0 local-first: SQLite via SQLAlchemy + Alembic; Postgres/
+    # pgvector are server-mode-only per the roadmap's storage design (§7) and
+    # are not used by any code yet -- removed in Phase 0.9's dependency trim,
+    # to be re-added only when Phase 7's Postgres storage backend is built)
     "sqlalchemy>=2.0.30,<2.1.0",
     "alembic>=1.13.1,<1.14.0",
 
-    # Embedded Keyword Search
+    # Embedded Keyword Search -- not yet wired in (that's Phase 2's
+    # Tantivy-backed lexical index), but deliberately kept per the roadmap's
+    # explicit Phase 0.9 dependency trim decision ("keep tantivy, finally use
+    # it") rather than removed now and re-added later.
     "tantivy>=0.22.0,<0.23.0",
-
-    # Caching & Job Queue (Redis Streams)
-    "redis>=5.0.4,<5.1.0",
 
     # Code Parsing & AST (Bundled, zero-compile)
     "tree-sitter>=0.21.0,<0.22.0",
@@ -34,7 +35,17 @@ dependencies = [
     "sentence-transformers>=3.0.0,<3.1.0",
     "torch>=2.3.0,<2.4.0",
 
-    # Utilities & Monitoring
+    # CLI Output (Phase 0.9: cli.py has always used Rich, but it was never
+    # actually declared -- it only worked because something else happened to
+    # pull it in transitively. Declaring it explicitly here is this
+    # milestone's fix; no new CLI integration was added.)
+    "rich>=15.0.0,<16.0.0",
+
+    # Utilities & Monitoring -- declared but not yet wired in (Phase 7
+    # activates structlog/prometheus-client for real observability); httpx is
+    # a genuine transitive requirement of FastAPI's TestClient today. Neither
+    # is in the roadmap's explicit Phase 0.9 removal list (only redis,
+    # pgvector, and psycopg[binary] are), so left untouched here.
     "prometheus-client>=0.20.0,<0.21.0",
     "httpx>=0.27.0,<0.28.0",
     "structlog>=24.1.0,<24.2.0"

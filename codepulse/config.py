@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tomllib
 from typing import Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class CodePulseConfig(BaseModel):
@@ -82,17 +82,46 @@ class CodePulseConfig(BaseModel):
         description="API server bind port",
     )
     cors_origins: list[str] = Field(
-        default_factory=lambda: ["*"],
-        description="Allowed CORS origin list",
+        default_factory=list,
+        description=(
+            "Allowed CORS origin list. Empty by default (deny all cross-origin "
+            "browser requests) -- Phase 0.9 replaces the prior '*' wildcard "
+            "default, which combined with allow_credentials=True was both an "
+            "unconsidered default and, per the CORS spec, a combination "
+            "browsers reject outright for credentialed requests. Set explicit "
+            "origin(s) via codepulse.toml's [server] section or the "
+            "CODEPULSE_CORS_ORIGINS env var for deployments that need "
+            "browser-based cross-origin access (e.g. a future Web UI)."
+        ),
     )
     cors_allow_credentials: bool = Field(
-        default=True,
-        description="Whether to allow credentials in CORS headers",
+        default=False,
+        description="Whether to allow credentials in CORS headers. Defaults to False (secure by default).",
     )
 
     model_config = {
         "extra": "ignore",
     }
+
+    @model_validator(mode="after")
+    def _validate_cors_policy(self) -> "CodePulseConfig":
+        """
+        Permanently rejects the invalid/insecure combination of a wildcard
+        CORS origin with credentials enabled (Phase 0.9) -- browsers
+        themselves refuse to honor credentialed requests against a '*'
+        origin, so allowing this combination to be configured at all would
+        only silently produce a broken (and misleadingly permissive-looking)
+        policy. This guards the setting itself, not just its default, so a
+        future config/env override can't reintroduce it unnoticed.
+        """
+        if self.cors_allow_credentials and "*" in self.cors_origins:
+            raise ValueError(
+                "Invalid CORS configuration: cors_allow_credentials=True cannot be "
+                "combined with a wildcard ('*') in cors_origins -- browsers reject "
+                "this combination for credentialed requests. Configure specific "
+                "origin(s) in cors_origins, or set cors_allow_credentials=False."
+            )
+        return self
 
 
 def _normalize_toml_dict(raw: dict[str, Any]) -> dict[str, Any]:
