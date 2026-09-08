@@ -31,7 +31,7 @@ Phase 1.2 — Central authorization dependency + endpoint enforcement (verified 
 | Phase 0.9 — CORS defaults + `pyproject.toml` trim + `rich` | COMPLETE | 95/95 full suite passed; no migration required | `8f77aaf` |
 | Phase 0.10 — Restart-survivability + idempotency test suite | COMPLETE | 99/99 full suite passed (95 pre-existing + 4 new); no production code changed; no migration required; real `codepulse.db` untouched | `4dd890d` |
 | Phase 1.1 — API key model + hashing + creation flow | COMPLETE | 112/112 full suite passed (99 pre-existing + 13 new); migration applied to real `codepulse.db`; re-verified in isolation (clean checkout, 112/112) before Phase 1.2 began | `190d9bb` |
-| Phase 1.2 — Central authorization dependency + endpoint enforcement | COMPLETE | 139/139 full suite passed (112 pre-existing + 27 new); no migration required; real `codepulse.db` untouched | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 1.2 — Central authorization dependency + endpoint enforcement | COMPLETE | 139/139 full suite passed (112 pre-existing + 27 new); no migration required; real `codepulse.db` untouched; re-verified post-commit (clean status, 139/139) | `a3a9b24` |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
 
@@ -119,7 +119,7 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 ## Exact Next Action
 
 NEXT ACTION:
-Commit the Phase 1.2 checkpoint (once explicitly instructed — pending as of this update; Phase 1.1 is already committed as `190d9bb`). Then begin Phase 1.3 — `IndexJob` state machine + `/v1/jobs/{id}` (§37), which will replace the fake `job_id`/`status: "queued"` response `/v1/repositories/index` currently returns with a real, pollable job record. **Do not begin Phase 1.3 without an explicit instruction to do so** — the milestone that requested this work explicitly said to stop after Phase 1.2's Definition of Done.
+Both Phase 1.1 (`190d9bb`) and Phase 1.2 (`a3a9b24`) are committed and independently verified. Next, begin Phase 1.3 — `IndexJob` state machine + `/v1/jobs/{id}` (§37), which will replace the fake `job_id`/`status: "queued"` response `/v1/repositories/index` currently returns with a real, pollable job record. **Do not begin Phase 1.3 without an explicit instruction to do so** — the milestone that requested this work explicitly said to stop after Phase 1.2's Definition of Done.
 
 ## Context Handoff Notes
 
@@ -133,5 +133,6 @@ Phase 1.2 implementation is complete and verified in this session:
   - New: `codepulse/api/security.py`, `tests/conftest.py`, `tests/test_api_authorization.py`.
   - Modified: `codepulse/api/app.py` (dependency wiring on all 12 routes), `tests/test_api.py`, `tests/test_cors.py`, `tests/test_no_fabricated_metrics.py`, this file.
   - No other file touched. `codepulse/indexer/engine.py`, `codepulse/storage/db.py`, `codepulse/auth.py` were **not** modified by this milestone (Phase 1.1's files, already committed, stay exactly as Phase 1.1 left them).
-- **Exact tests run**: `.venv/Scripts/python.exe -m pytest -v` → 139 passed, 0 failed, 13 warnings, ~202s.
-- **What remains**: **committing this work to git** (not yet done as of this document update — pending an explicit commit instruction). After that, the next roadmap step is Phase 1.3, which must **not** begin without an explicit instruction to do so, per this milestone's own directive to stop and report at exactly 1.2's Definition of Done.
+- **Exact tests run**: `.venv/Scripts/python.exe -m pytest -v` → 139 passed, 0 failed, 13 warnings, ~202s (pre-commit); re-run post-commit, `-q` → 139 passed, 0 failed, ~216s.
+- **Committed**: `a3a9b24` (`feat: implement Phase 1.2 API key enforcement`), on top of Phase 1.1's `190d9bb`. Diff reviewed before committing — exactly the 8 intended files (`codepulse/api/security.py`, `codepulse/api/app.py`, `tests/conftest.py`, `tests/test_api_authorization.py`, `tests/test_api.py`, `tests/test_cors.py`, `tests/test_no_fabricated_metrics.py`, this file), nothing else; no `IndexJob`/Phase 1.3 code present (confirmed via `grep`); `codepulse/indexer/` untouched. Post-commit: `git status` clean, commit present in `git log`, full suite re-run and green.
+- **What remains**: nothing for this milestone. The next roadmap step is Phase 1.3, which must **not** begin without an explicit instruction to do so, per this milestone's own directive to stop and report at exactly 1.2's Definition of Done.
