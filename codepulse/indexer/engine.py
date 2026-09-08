@@ -11,6 +11,7 @@ import numpy as np
 
 from codepulse.embeddings.chunker import CodeChunk, SemanticChunker
 from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableError
+from codepulse.indexer.ignore import RepositoryIgnoreRules
 from codepulse.models import FileParseResult, Symbol, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
@@ -163,16 +164,38 @@ class IndexingEngine:
         # structures are already populated).
         repo_id = self._resolve_repo_id(repo_name, resolved_repo_url)
 
+        # Phase 0.8: load this repository's .gitignore/.codepulseignore
+        # rules ONCE, before walking the tree, and reuse them for every
+        # discovered path -- see codepulse.indexer.ignore for the exact
+        # semantics (additive combination, root-only, malformed-file
+        # handling). This is layered on top of, not a replacement for, the
+        # existing hardcoded IGNORE_DIRS/IGNORE_EXTENSIONS filtering below.
+        ignore_rules = RepositoryIgnoreRules(repo_path)
+
         all_files: list[str] = []
 
         # 1. Discover all source code files
         for root, dirs, files in os.walk(repo_path):
-            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            kept_dirs = []
+            for d in dirs:
+                if d in IGNORE_DIRS:
+                    continue
+                rel_dir = os.path.relpath(os.path.join(root, d), repo_path).replace("\\", "/")
+                if ignore_rules.is_ignored(rel_dir, is_dir=True):
+                    # Prune here (not just skip later) so nothing beneath
+                    # an ignored directory is walked, read, or parsed at all.
+                    continue
+                kept_dirs.append(d)
+            dirs[:] = kept_dirs
+
             for f in files:
                 _, ext = os.path.splitext(f)
                 if ext.lower() in IGNORE_EXTENSIONS:
                     continue
                 full_path = os.path.join(root, f)
+                rel_path = os.path.relpath(full_path, repo_path).replace("\\", "/")
+                if ignore_rules.is_ignored(rel_path, is_dir=False):
+                    continue
                 all_files.append(full_path)
 
         total_files = len(all_files)

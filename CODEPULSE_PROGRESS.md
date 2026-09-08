@@ -10,11 +10,11 @@ Phase 0 — Foundation / Correctness
 
 ## Current Milestone
 
-None actively in progress. Awaiting start of Phase 0.8 — `.gitignore`/`.codepulseignore` discovery and ignore-rule handling.
+None actively in progress. Awaiting start of Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `rich`; delete shipped `codepulse.db`; git init (git init already done in a prior phase).
 
 ## Last Completed Milestone
 
-Phase 0.7 — Remove all hardcoded metric values from API responses (verified COMPLETE)
+Phase 0.8 — `.gitignore`/`.codepulseignore` discovery and ignore-rule handling (verified COMPLETE)
 
 ## Completed Milestones
 
@@ -26,66 +26,65 @@ Phase 0.7 — Remove all hardcoded metric values from API responses (verified CO
 | Phase 0.4 — Symbol Upsert by `(file_id, name, start_line)` | COMPLETE | 49/49 full suite passed; migration applied to real `codepulse.db` | `e0b3ec0` |
 | Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed; migration applied to real `codepulse.db` | `50dbe22` |
 | Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed; no migration required | `aea7518` |
-| Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed (69 pre-existing + 5 new); no migration required; verified against the real `codepulse.db` read-only | `704c41d` |
-| Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | NOT IMPLEMENTED | — | — |
+| Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed; no migration required | `704c41d` |
+| Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | COMPLETE | 86/86 full suite passed (74 pre-existing + 12 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.9 — CORS/pyproject/rich cleanup | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
 
 ## Current Implementation State
 
-- **Fabricated metrics removed from `codepulse/api/app.py` (Phase 0.7):**
-  - `index_size_mb` (hardcoded `12`/`15`) — removed from both branches of `GET /v1/repositories/{id}/index-status`. No on-disk/in-memory index-footprint measurement exists anywhere in the system.
-  - `estimated_time_seconds` (hardcoded `10`) — removed from `POST /v1/repositories/index`. No timing model or historical job-duration data exists.
-  - `total_queries` (hardcoded `100`) and `avg_search_latency_ms` (hardcoded `45`) — removed from `GET /v1/repositories/{id}/stats`. No query-log or latency-aggregation table exists (real query analytics is a later roadmap milestone, `SearchFeedback`/B28, Phase 1 — not built here).
-  - `POST /v1/search/feedback`'s response previously claimed `"status": "recorded"` and `"message": "...Weights updated."` while writing nothing anywhere and touching no ranking weights — a fabricated success/effect claim, not just a numeric one. Changed to `"status": "received"` and an honest message ("Feedback received. Not yet persisted or used to adjust ranking.") that doesn't claim an effect that didn't happen. No new persistence was built (that's B28/Phase 1 — explicitly out of scope here).
-- **Legitimate metrics preserved, verified as genuinely measured/computed, not touched:** `execution_time_ms` (search + ide-search — real `time.time()` delta around the actual `search()` call), all ranker output fields (`final_score`/`keyword_score`/`vector_score`/`embedding_distance`/`graph_score` — real Phase 0.6 hybrid ranker output), `complexity` (real static-analysis branch count from the parser), `similarity`/`relevance_score` in find_similar_code (real cosine similarity), `direct_callers`/`indirect_callers` in impact-analysis (real graph-traversal counts — heuristic accuracy is a separate, already-documented Phase 3 concern, not fabrication), `embedding_model` (a configured value, not a metric — correctly left alone).
-- **`job_id`** (`api/app.py`'s `index_repository`) was deliberately left untouched — not a numeric metric (an identifier), and already separately categorized in this project's own audit history as a distinct "fake job ID" issue tied to Phase 1's real `IndexJob` model (B9), not Phase 0.7's "fabricated metrics" (B5). Building real job tracking now would be Phase-1 scope creep.
-- **`"last_indexed": "live"`** in the index-status fallback branch was left untouched — an honest placeholder signaling "this came from live memory, not a stored timestamp," not an invented measurement.
-- **Discovered but explicitly NOT fixed (documented, not silently expanded into this milestone):** the `languages` breakdown in `get_repository_stats` and the fallback counts in `get_index_status`'s "repo not found" branch are computed from `indexing_engine.parse_results`/`symbols_by_id` — global, unscoped structures that Phase 0.6's repository-scoping work did not reach (Phase 0.6 only tagged `bm25_index`/`vector_index`/`call_graphs`). These values are **real, computed counts** (not fabricated — no invented/placeholder/hardcoded numbers involved), just potentially cross-repository-contaminated in a multi-repo process. This is a repository-isolation gap, not a fabricated-metric issue, and fixing it would require the same kind of tagging work Phase 0.6 did for the search structures — out of Phase 0.7's scope. Flagged here per CLAUDE.md §12 ("record in CODEPULSE_PROGRESS.md rather than silently expanding scope").
-- No API endpoint was added, removed, renamed, or had its URL/HTTP-method contract changed. No response field was added. Only fabricated fields were removed, and two string values (feedback's `status`/`message`) were corrected.
+- **Ignore-rule handling is now implemented (Phase 0.8).** New module `codepulse/indexer/ignore.py` (`RepositoryIgnoreRules`) loads a repository's root-level `.gitignore` and `.codepulseignore` files once per `index_directory()` call and answers `is_ignored(rel_path, is_dir)` for every discovered path, using the real `pathspec` library (`gitignore`/gitwildmatch pattern semantics — negation, `**` globs, directory-only trailing-slash patterns, standard precedence) rather than a hand-rolled matcher.
+- **Exact semantics implemented (see `ignore.py`'s module docstring for the full rationale):**
+  - `.gitignore`: standard gitignore pattern syntax, root-level only.
+  - `.codepulseignore`: same syntax, **additive** to `.gitignore` ("beyond git's own," per roadmap §16) — not an override/replacement.
+  - The two files are evaluated **independently**; a path is excluded if *either* file's own ruleset matches it (each file's negations only resolve within that same file — a negation in one file cannot reach across and un-ignore something the other file excludes).
+  - **Root-only, no nested/per-directory ignore files** — a documented, deliberate limitation (the roadmap doesn't call for git's full nested-ignore-file behavior, and it's materially more scope than "respect the repo's ignore rules").
+  - Absent ignore file → empty ruleset, no error.
+  - Present-but-unreadable or present-but-unparseable ignore file → that file's ruleset is treated as empty, a warning is logged (file name + error), indexing proceeds rather than aborting.
+  - `.gitignore`/`.codepulseignore` themselves are never indexed — not because of new special-case logic, but because no `LanguageParser` recognizes them (a pre-existing fact of `parser/factory.py`'s extension dispatch), now explicitly asserted by a test.
+- **Discovery integration point:** `IndexingEngine.index_directory()`, step 1 (`codepulse/indexer/engine.py`). `RepositoryIgnoreRules` is constructed **once** per call (not stored on `self` — no shared/global state between repositories) and layered on top of the pre-existing hardcoded `IGNORE_DIRS`/`IGNORE_EXTENSIONS` filtering (both unchanged, still checked first as a cheap short-circuit). Ignored directories are **pruned** from `os.walk`'s `dirs` list in place (matching the pre-existing pruning mechanism for `IGNORE_DIRS`), so nothing beneath an ignored directory is walked, read, or parsed — not merely filtered out afterward. Ignore filtering happens entirely within step 1, before step 2 (parsing) even begins, so an ignored file is never opened, read, parsed, chunked, embedded, or persisted.
+- **Ignored files create zero downstream artifacts** for that indexing run: no `FileModel` row, no `SymbolModel` row, no `EmbeddingModel` row, no BM25/vector-index entry, no call-graph entry — verified directly (DB queries + in-memory index inspection + a real search-miss check), not inferred.
+- **Re-indexing / stale-data limitation (deliberately NOT implemented):** if a file was indexed in a *previous* run and later becomes newly ignored (a new `.gitignore` line added, etc.), its existing `FileModel`/`SymbolModel`/`EmbeddingModel` rows from the prior run are **NOT deleted or cleaned up** by this milestone. Phase 0.8 only affects *discovery for new indexing operations* — it does not implement stale-data cleanup for previously-indexed-now-ignored files. This matches the roadmap's own framing (`ON DELETE CASCADE`-based stale-data cleanup is explicitly Phase 3 territory) and this session's explicit instruction not to invent that system now. **This is a real, user-visible limitation**: re-indexing a repository after adding a new ignore rule will not retroactively remove already-indexed rows for now-ignored files.
+- Paths: ignore-matching uses the exact same `os.path.relpath(path, repo_path).replace("\\", "/")` convention already established elsewhere in the pipeline for `FileParseResult.file_path`/`Symbol.file_path`/DB storage — no new path-normalization scheme was introduced, and no existing stored path format changed.
+- New runtime dependency: `pathspec>=1.1.0,<1.2.0` (added to `pyproject.toml`) — a small, standard, pure-Python library for gitignore-pattern matching (used by many major Python tools). Chosen over hand-rolling gitignore semantics (order-dependent negation, `**`, directory-only patterns) because "same syntax" (§16) means *real* gitignore behavior is expected, and a well-tested library is lower-risk than a bespoke matcher for a famously fiddly spec.
+- No file-size or file-type caps were implemented (§8 mentions them alongside ignore-file handling, but they're a distinct, not-yet-built concern, out of this milestone's scope).
 
 ## Database State
 
 - `codepulse.db` exists at the repository root, untracked by git.
-- **Current Alembic revision (real `codepulse.db`): `49572f834366`** — **unchanged by Phase 0.7**. No migration was created or needed: removing hardcoded response literals and correcting two string values requires no schema change.
+- **Current Alembic revision (real `codepulse.db`): `49572f834366`** — **unchanged by Phase 0.8**. No migration was created or needed: ignore-rule handling is a discovery-time filter, not a schema concern.
 - Row counts (unchanged since Phase 0.3, re-verified this session): `repositories` = 1, `files` = 18, `symbols` = 128, `dependencies` = 528, `code_embeddings` = 0.
-- The real `codepulse.db` was **not modified** during Phase 0.7. All verification was either fully read-only (`GET` endpoints, queried with a deliberately nonexistent `repository_id` so no dependency on the real DB's specific content) or performed against a temporary, disposable database via monkeypatching the API module's global `storage_manager`/`indexing_engine` for the one test (`POST /v1/repositories/index`) that would otherwise have written to the real DB (FastAPI's `TestClient` runs `BackgroundTasks` synchronously, so that endpoint's background indexing call actually executes during the test). The swap was verified to have actually redirected the write (confirmed present in the temp DB), and the real `codepulse.db`'s row counts were re-checked identical before and after the full test run.
+- The real `codepulse.db` was **not modified** during Phase 0.8. All verification used temporary, disposable SQLite databases and temporary repository directories under `tmp_path`; the real DB's revision and row counts were re-checked identical before and after the full test run.
 
 ## Test State
 
-- Last full suite result: **74 passed, 0 failed, 13 warnings** (`.venv/Scripts/python.exe -m pytest tests/ -v`), ~156s.
-- Focused Phase 0.7 tests: `tests/test_no_fabricated_metrics.py` (5 tests, calling the real FastAPI endpoints via `TestClient` and inspecting actual JSON responses, not just source code): `index_size_mb` absent from index-status; `total_queries`/`avg_search_latency_ms` absent from stats; `estimated_time_seconds` absent from the index-repository response (verified via a monkeypatched temp DB, confirmed the actual write landed there and not in the real `codepulse.db`); the feedback endpoint no longer claims `"recorded"` or "weights updated"; `execution_time_ms` is confirmed to remain present and be a real non-negative measured value (locking in its "legitimate metric" classification, not accidentally removed).
-- Updated existing test: `tests/test_api.py::test_api_feedback_endpoint` — previously asserted `status == "recorded"` (which encoded the exact fabricated claim this milestone removes); now asserts `status == "received"` and that the response no longer says "weights updated." This is a documented, deliberate API-contract compatibility change (see below), not a weakened test — it now asserts a strictly more truthful contract.
-- All other pre-existing tests re-run unchanged and pass, confirming no regression to Phase 0.6 repository-scoping, Phase 0.5 hydration/no-pseudo-embedding-fallback, or Phase 0.3/0.4 upsert behavior.
-- No test was skipped or deleted.
-- Known warnings: `StarletteDeprecationWarning` (httpx/TestClient) and `FutureWarning`s from `tree_sitter` — pre-existing, not addressed.
+- Last full suite result: **86 passed, 0 failed, 13 warnings** (`.venv/Scripts/python.exe -m pytest tests/ -v`), ~157s.
+- Focused Phase 0.8 tests: `tests/test_ignore_discovery.py` (12 tests, exercising the real `IndexingEngine.index_directory()`/`.search()` pipeline end-to-end against temp repos/DBs, real embedding model via a module-scoped shared `CodeEmbedder`): no ignore files (baseline); `.gitignore` excludes a file; `.gitignore` excludes a directory and everything nested beneath it; `.codepulseignore` excludes a file and a directory; combined `.gitignore` + `.codepulseignore` (proves additive union, not override); pattern matches a nested (non-root) path; negation pattern re-includes a file standard gitignore syntax requires; an ignored file produces no `FileModel`/`SymbolModel` rows, no BM25/vector-index entry, and no search hit for content unique to it; two repositories indexed by the same engine instance have fully independent ignore rules (no shared/global state); `.gitignore`/`.codepulseignore` themselves are never indexed; a malformed pattern (`[z-a]`, verified directly against `pathspec` to actually raise) does not crash indexing and the rest of the repo still indexes correctly; a `RepositoryIgnoreRules` unit-level sanity check for the no-ignore-files case.
+- All 74 pre-existing tests re-run unchanged and pass, confirming no regression to Phase 0.3–0.7 behavior (upsert idempotency, embedding persistence/hydration, no pseudo-embedding fallback, repository-scoped search, fabricated-metric removal).
+- No test was weakened, skipped, or deleted.
+- Known warnings: `StarletteDeprecationWarning` (httpx/TestClient) and `FutureWarning`s from `tree_sitter` — pre-existing, not addressed. (A `pathspec` `DeprecationWarning` for the `"gitwildmatch"` factory name was hit during development and fixed by switching to the non-deprecated `"gitignore"` factory name before finalizing — not present in the final result.)
 
 ## Known Issues
 
 **Roadmap work remaining (Phase 0, not yet implemented):**
-- 0.8 `.gitignore`/`.codepulseignore`-respecting file discovery
 - 0.9 Fix CORS policy defaults; trim `pyproject.toml`; add `rich`
-- 0.10 Restart-survivability + idempotency test suite (beyond what 0.3-0.7's own focused tests cover)
+- 0.10 Restart-survivability + idempotency test suite (beyond what 0.3-0.8's own focused tests cover)
 
 **Known technical debt:**
 - `StorageManager.create_tables()` still unconditionally calls `Base.metadata.create_all()` alongside Alembic.
 - `SymbolType.VARIABLE` / `SymbolType.INTERFACE` enum values defined but never produced by either parser.
-- Dead/unused `job_id` generation in `api/app.py` — Phase 1 (`IndexJob`) scope, deliberately not touched in Phase 0.7 (see Current Implementation State).
+- Dead/unused `job_id` generation in `api/app.py` — Phase 1 (`IndexJob`) scope.
 - Dependency (call graph edge) rows still duplicate on every re-index (Phase 3 scope).
-- **`languages` breakdown (`get_repository_stats`) and the "repo not found" fallback counts (`get_index_status`) are not repository-scoped** — computed from global `indexing_engine.parse_results`/`symbols_by_id`, which Phase 0.6 didn't tag with `repo_id` (only `bm25_index`/`vector_index`/`call_graphs` were). In a multi-repository process, these values can reflect more than the requested repository. Discovered during Phase 0.7's audit; not fabrication (real computed counts), so intentionally left unfixed here — flagged for a future, explicitly-scoped fix.
-- `BM25Index`/`CallGraphBuilder` are still in-memory-only with no durable backing — only embeddings/semantic search survive a real process restart.
-- `IndexingEngine.search(search_type="semantic"/"hybrid")` still does not catch `EmbeddingUnavailableError` for the query-side embed call (noted since Phase 0.5, unaffected by Phase 0.7).
-- No `/health/live` or `/health/ready` endpoint exists at all yet (described in the roadmap's §18 design but never implemented) — nothing to audit there for Phase 0.7; noted for whichever future milestone builds it, so it's built honest from the start.
+- `languages` breakdown (`get_repository_stats`) and the "repo not found" fallback counts (`get_index_status`) are not repository-scoped (discovered in Phase 0.7's audit, not fabrication, still unfixed).
+- `BM25Index`/`CallGraphBuilder` are still in-memory-only with no durable backing.
+- `IndexingEngine.search(search_type="semantic"/"hybrid")` still does not catch `EmbeddingUnavailableError` for the query-side embed call.
+- No `/health/live` or `/health/ready` endpoint exists yet.
+- **New from Phase 0.8: no stale-data cleanup for previously-indexed files that become newly ignored** — see "Re-indexing / stale-data limitation" above. A repository re-indexed after its ignore rules change will retain database rows for files that are now ignored, until a future (Phase 3-adjacent) stale-data-cleanup milestone addresses it.
+- **New from Phase 0.8: no nested/per-directory `.gitignore`/`.codepulseignore` support** — only the repository-root files are read. A `.gitignore` in a subdirectory is not consulted (this differs from real git's own behavior, which does support nested ignore files) — a deliberate scope-limiting decision, documented in `codepulse/indexer/ignore.py`.
+- **New from Phase 0.8: no file-size or file-type caps** — mentioned alongside ignore-file handling in roadmap §8 but not implemented; a distinct future concern.
 
-**Blockers:** none currently known for starting Phase 0.8.
-
-## API Compatibility Impact (Phase 0.7)
-
-- `GET /v1/repositories/{id}/index-status`: response no longer includes `index_size_mb`. Any consumer reading that field will now get a missing key instead of a fake number.
-- `POST /v1/repositories/index`: response no longer includes `estimated_time_seconds`.
-- `GET /v1/repositories/{id}/stats`: response no longer includes `total_queries` or `avg_search_latency_ms`.
-- `POST /v1/search/feedback`: `status` value changed from the literal `"recorded"` to `"received"`; `message` text changed from `"Thank you for feedback. Weights updated."` to `"Feedback received. Not yet persisted or used to adjust ranking."` Any consumer doing an exact string match on either value will need updating — this is the one behavior-visible contract change in this milestone, made because the old values were factually false, not a redesign.
-- No endpoint's URL, HTTP method, request schema, or status code changed. No field was added.
+**Blockers:** none currently known for starting Phase 0.9.
 
 ## Deferred Work
 
@@ -96,29 +95,32 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 - Learned/adaptive ranking, LLM reranking, LLM-generated explanations as source of truth
 - PostgreSQL/pgvector, Tantivy-backed lexical index, embedded ANN vector index (Phase 2)
 - `RepositorySnapshot`, `IndexJob`, `APIKey`, authentication/authorization, real `SearchFeedback` persistence (Phase 1/3)
-- Call-graph confidence scoring, impact-analysis depth bucketing, module clustering (Phase 3/4)
+- Call-graph confidence scoring, impact-analysis depth bucketing, module clustering, stale-data cleanup for newly-ignored files (Phase 3/4)
 - MCP server (Phase 5)
 - VS Code extension, Web UI (Phase 6)
-- Observability infrastructure (`structlog`/`prometheus-client` wiring, health endpoints) — Phase 7
+- Observability infrastructure (Phase 7)
+- Default-exclusion of secret-shaped filenames (`.env*`, `*.pem`, `*.key`, `id_rsa*`) with an opt-in override flag, and lockfile/minified-bundle detection beyond the existing `IGNORE_DIRS`/`IGNORE_EXTENSIONS` sets — both mentioned in roadmap §16 alongside `.gitignore`/`.codepulseignore` support, but not part of B6's narrow definition of done ("ignored files never appear in the index") and not implemented in Phase 0.8; flagged here as a plausible future near-term item, not assumed to be required.
 
 ## Current Risks
 
-- `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 0.7, still worth splitting up eventually.
-- The `languages`/fallback-counts repository-isolation gap noted above is real and pre-dates this audit having found it — anyone building on `get_repository_stats` or the index-status fallback branch in a multi-repo deployment should be aware the numbers can be wrong until that's fixed.
+- `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 0.8.
+- The `languages`/fallback-counts repository-isolation gap (Phase 0.7 finding) remains unfixed.
 - Only `repositories`, `files`, `symbols`, `code_embeddings` are idempotent; `dependencies` is not (Phase 3 scope).
+- Anyone relying on ignore rules to *retroactively* remove already-indexed secrets/noise from the database should be aware Phase 0.8 only prevents *new* indexing of ignored files — it does not purge rows from before the ignore rule existed (see Known Issues).
 
 ## Exact Next Action
 
 NEXT ACTION:
-Implement Phase 0.8 — `.gitignore`/`.codepulseignore`-respecting file discovery, according to the authoritative roadmap (`codepulse/indexer/engine.py`'s file-discovery loop currently only filters via hardcoded `IGNORE_DIRS`/`IGNORE_EXTENSIONS` sets; no `.gitignore` or `.codepulseignore` parsing exists at all).
+Implement Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `rich`, according to the authoritative roadmap (`codepulse/config.py`'s `cors_origins`/`cors_allow_credentials` defaults are still permissive `["*"]`/`True`; `pyproject.toml` still declares unused `psycopg[binary]`, `pgvector`, `tantivy`, `redis`; `cli.py` imports `rich`, which is still undeclared as a dependency).
 
 ## Context Handoff Notes
 
-Phase 0.7 implementation is complete, verified, and committed (`704c41d`):
+Phase 0.8 implementation is complete and verified in this session:
 
-- What was done: audited every field in `codepulse/api/app.py`'s 12 endpoints (confirmed to be the only FastAPI app/API surface in the codebase) against a 5-way classification (legit/configured/fabricated/unavailable/ambiguous); removed `index_size_mb`, `estimated_time_seconds`, `total_queries`, `avg_search_latency_ms`; corrected `/v1/search/feedback`'s false `"recorded"`/"weights updated" claims to honest `"received"`/"not yet persisted" wording; added `tests/test_no_fabricated_metrics.py` (5 new tests against real HTTP responses); updated `tests/test_api.py`'s one affected assertion with the change documented in its own docstring.
-- What was verified: full suite 74/74 passed; the one test that would otherwise have written to the real `codepulse.db` (`POST /v1/repositories/index`, since `TestClient` runs `BackgroundTasks` synchronously) was safely isolated via monkeypatching the app module's `storage_manager`/`indexing_engine` to a temp DB, with the redirect explicitly confirmed; real `codepulse.db` re-verified unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after the full run.
+- What was done: audited the complete discovery pipeline first (confirmed `os.walk`-based discovery in `IndexingEngine.index_directory` step 1, with pre-existing `IGNORE_DIRS`/`IGNORE_EXTENSIONS` hardcoded filtering and directory-pruning already in place, and confirmed no `.gitignore`/`.codepulseignore` support existed at all); added `codepulse/indexer/ignore.py` (`RepositoryIgnoreRules`, built on the real `pathspec` library); integrated it into step 1's `os.walk` loop (directory pruning + file filtering, layered on top of the existing hardcoded sets); added `pathspec>=1.1.0,<1.2.0` to `pyproject.toml`; added `tests/test_ignore_discovery.py` (12 new tests against the real indexing pipeline).
+- What was verified: full suite 86/86 passed; real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
 - No Alembic migration was created (none needed).
-- Committed as `704c41d` (4 files changed: `codepulse/api/app.py`, `tests/test_api.py` modified; `tests/test_no_fabricated_metrics.py` new; this file updated).
-- Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 74 passed, 0 failed.
-- Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.8, starting with re-reading roadmap §16 (secrets/ignore-file handling design) and B6's definition of done ("ignored files never appear in the index").
+- What remains: **committing this work to git** (not yet done as of this document update — the user's instructions for this milestone explicitly said not to commit), then starting Phase 0.9.
+- Exact files changed this session (uncommitted at time of writing): `codepulse/indexer/engine.py`, `pyproject.toml` (both modified); `codepulse/indexer/ignore.py`, `tests/test_ignore_discovery.py` (both new); this file updated.
+- Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 86 passed, 0 failed.
+- Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.9, starting with re-reading roadmap sprint item 0.9 ("Fix CORS policy; trim pyproject.toml; add rich; delete committed codepulse.db; git init" — note git init and codepulse.db-never-committed are already satisfied from earlier phases, so 0.9's remaining real work is CORS defaults + dependency trimming + declaring `rich`).

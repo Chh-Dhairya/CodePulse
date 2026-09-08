@@ -27,6 +27,9 @@ dependencies = [
     "tree-sitter>=0.21.0,<0.22.0",
     "tree-sitter-languages>=1.10.2",
 
+    # File Discovery (.gitignore / .codepulseignore pattern matching, Phase 0.8)
+    "pathspec>=1.1.0,<1.2.0",
+
     # AI / Embeddings
     "sentence-transformers>=3.0.0,<3.1.0",
     "torch>=2.3.0,<2.4.0",
