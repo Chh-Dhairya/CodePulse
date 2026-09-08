@@ -26,6 +26,7 @@ from pydantic import ValidationError
 
 from codepulse.api.app import app as real_app
 from codepulse.config import CodePulseConfig, reset_settings
+from tests.conftest import make_api_key_headers
 
 real_client = TestClient(real_app)
 
@@ -56,10 +57,14 @@ def _build_app_with_cors(settings: CodePulseConfig) -> TestClient:
 
 # --- 1. Default origin behavior (the real, running app) --------------------
 
-def test_default_cors_denies_all_origins():
-    response = real_client.get(
-        "/v1/autocomplete?prefix=x", headers={"Origin": "http://evil.example.com"}
-    )
+def test_default_cors_denies_all_origins(isolated_app):
+    # Phase 1.2: /v1/autocomplete now requires a valid API key -- an
+    # isolated, disposable database + real key is used so this test never
+    # authenticates against the real codepulse.db. This does not affect
+    # CORSMiddleware's behavior, which is configured once on the `app`
+    # object itself, independent of storage_manager/indexing_engine.
+    headers = {"Origin": "http://evil.example.com", **make_api_key_headers(isolated_app)}
+    response = real_client.get("/v1/autocomplete?prefix=x", headers=headers)
     assert response.status_code == 200
     # No origin is allowed by default -- the browser-enforced header must be
     # absent entirely (deny), not a wildcard.
@@ -74,10 +79,9 @@ def test_default_cors_preflight_grants_nothing():
     assert "access-control-allow-origin" not in response.headers
 
 
-def test_default_credentials_header_absent():
-    response = real_client.get(
-        "/v1/autocomplete?prefix=x", headers={"Origin": "http://example.com"}
-    )
+def test_default_credentials_header_absent(isolated_app):
+    headers = {"Origin": "http://example.com", **make_api_key_headers(isolated_app)}
+    response = real_client.get("/v1/autocomplete?prefix=x", headers=headers)
     assert "access-control-allow-credentials" not in response.headers
 
 

@@ -4,10 +4,11 @@ import os
 import time
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.storage.db import (
@@ -80,7 +81,13 @@ class FeedbackRequest(BaseModel):
 # 1. Search Endpoint (POST /v1/search)
 # -------------------------------------------------------------
 @app.post("/v1/search")
-def search(req: SearchRequest):
+def search(req: SearchRequest, auth: AuthorizedKey = Depends(require_api_key)):
+    # Phase 1.2: repository_id may legitimately be omitted (None) to mean
+    # "search every repository" (an existing Phase 0.6 IndexingEngine
+    # feature) -- but that can never be authorized against a specific
+    # key's repository grants, so it's rejected here. See
+    # AuthorizedKey.authorize_search_scope's docstring.
+    auth.authorize_search_scope(req.repository_id)
     t0 = time.time()
     results = indexing_engine.search(
         req.query,
@@ -102,7 +109,16 @@ def search(req: SearchRequest):
 # 2. Index Repository (POST /v1/repositories/index)
 # -------------------------------------------------------------
 @app.post("/v1/repositories/index", status_code=202)
-def index_repository(req: IndexRepoRequest, bg_tasks: BackgroundTasks):
+def index_repository(
+    req: IndexRepoRequest, bg_tasks: BackgroundTasks, auth: AuthorizedKey = Depends(require_api_key)
+):
+    # Phase 1.2: this endpoint creates/re-indexes a repository -- there is
+    # no *existing* repository scope to check a not-yet-indexed path
+    # against (the roadmap's repository-scoping model authorizes access to
+    # already-known repositories; ingestion-path safety itself -- allow-
+    # listing, SSRF checks, size caps -- is explicitly Phase 1.5 / B10, not
+    # this milestone). So only authentication (a valid, non-revoked key) is
+    # required here; no `auth.authorize_repository(...)` call.
     job_id = f"job_{int(time.time())}"
 
     def run_indexing():
@@ -129,7 +145,8 @@ def index_repository(req: IndexRepoRequest, bg_tasks: BackgroundTasks):
 # 3. Get Index Status (GET /v1/repositories/{id}/index-status)
 # -------------------------------------------------------------
 @app.get("/v1/repositories/{repo_id}/index-status")
-def get_index_status(repo_id: int):
+def get_index_status(repo_id: int, auth: AuthorizedKey = Depends(require_api_key)):
+    auth.authorize_repository(repo_id)
     session = storage_manager.get_session()
     try:
         repo = session.query(RepositoryModel).filter(RepositoryModel.id == repo_id).first()
@@ -165,12 +182,21 @@ def get_index_status(repo_id: int):
 # 4. Get Symbol Details (GET /v1/symbols/{id})
 # -------------------------------------------------------------
 @app.get("/v1/symbols/{symbol_id}")
-def get_symbol_details(symbol_id: int):
+def get_symbol_details(symbol_id: int, auth: AuthorizedKey = Depends(require_api_key)):
     session = storage_manager.get_session()
     try:
         sym = session.query(SymbolModel).filter(SymbolModel.id == symbol_id).first()
         if not sym:
             raise HTTPException(status_code=404, detail="Symbol not found")
+        # Phase 1.2: a symbol is not requested by repository_id directly,
+        # but every symbol belongs to exactly one repository (via its
+        # file's non-nullable repo_id FK) -- resolve and authorize it
+        # before returning any content, per §15/§30's "every query (search,
+        # symbol lookup, graph traversal) is filtered by repository_id and
+        # the caller's permitted repository set."
+        if not sym.file:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        auth.authorize_repository(sym.file.repo_id)
 
         # Query call graph relations
         called_by = (
@@ -205,12 +231,17 @@ def get_symbol_details(symbol_id: int):
 # 5. Find Similar Code (POST /v1/symbols/{id}/similar)
 # -------------------------------------------------------------
 @app.post("/v1/symbols/{symbol_id}/similar")
-def find_similar_code(symbol_id: int, req: SimilarCodeRequest):
+def find_similar_code(
+    symbol_id: int, req: SimilarCodeRequest, auth: AuthorizedKey = Depends(require_api_key)
+):
     session = storage_manager.get_session()
     try:
         sym = session.query(SymbolModel).filter(SymbolModel.id == symbol_id).first()
         if not sym:
             raise HTTPException(status_code=404, detail="Symbol not found")
+        if not sym.file:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        auth.authorize_repository(sym.file.repo_id)
 
         query_text = f"{sym.signature}\n{sym.docstring or ''}\n{sym.body[:500]}"
         query_vec = indexing_engine.embedder.encode(query_text)
@@ -241,12 +272,17 @@ def find_similar_code(symbol_id: int, req: SimilarCodeRequest):
 # 6. Analyze Impact (POST /v1/symbols/{id}/impact-analysis)
 # -------------------------------------------------------------
 @app.post("/v1/symbols/{symbol_id}/impact-analysis")
-def analyze_impact(symbol_id: int, req: ImpactAnalysisRequest):
+def analyze_impact(
+    symbol_id: int, req: ImpactAnalysisRequest, auth: AuthorizedKey = Depends(require_api_key)
+):
     session = storage_manager.get_session()
     try:
         sym = session.query(SymbolModel).filter(SymbolModel.id == symbol_id).first()
         if not sym:
             raise HTTPException(status_code=404, detail="Symbol not found")
+        if not sym.file:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        auth.authorize_repository(sym.file.repo_id)
 
         if indexing_engine.call_graph:
             callers = indexing_engine.call_graph.get_callers(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
@@ -269,7 +305,18 @@ def analyze_impact(symbol_id: int, req: ImpactAnalysisRequest):
 # 7. Autocomplete (GET /v1/autocomplete)
 # -------------------------------------------------------------
 @app.get("/v1/autocomplete")
-def autocomplete(prefix: str = Query(..., min_length=1), limit: int = 10):
+def autocomplete(
+    prefix: str = Query(..., min_length=1),
+    limit: int = 10,
+    auth: AuthorizedKey = Depends(require_api_key),
+):
+    # Phase 1.2: authentication only. This endpoint has no repository_id
+    # parameter at all -- it already searches the global in-memory engine
+    # state unscoped by repository (a pre-existing limitation documented
+    # since Phase 0.7, not something this milestone's literal scope -- "a
+    # FastAPI dependency injected into every route" -- extends to fixing;
+    # doing so would mean redesigning this endpoint's signature, which is
+    # 1.3+-shaped scope creep, not 1.2).
     prefix_lower = prefix.lower()
     matches = []
 
@@ -292,12 +339,20 @@ def autocomplete(prefix: str = Query(..., min_length=1), limit: int = 10):
 # 8. Search within Function (POST /v1/symbols/{id}/search)
 # -------------------------------------------------------------
 @app.post("/v1/symbols/{symbol_id}/search")
-def search_within_symbol(symbol_id: int, query: str = Query(...), search_in: str = "all"):
+def search_within_symbol(
+    symbol_id: int,
+    query: str = Query(...),
+    search_in: str = "all",
+    auth: AuthorizedKey = Depends(require_api_key),
+):
     session = storage_manager.get_session()
     try:
         sym = session.query(SymbolModel).filter(SymbolModel.id == symbol_id).first()
         if not sym:
             raise HTTPException(status_code=404, detail="Symbol not found")
+        if not sym.file:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        auth.authorize_repository(sym.file.repo_id)
 
         target_text = ""
         if search_in == "docstring":
@@ -323,12 +378,13 @@ def search_within_symbol(symbol_id: int, query: str = Query(...), search_in: str
 # 9. List Symbols in File (GET /v1/files/{file_id}/symbols)
 # -------------------------------------------------------------
 @app.get("/v1/files/{file_id}/symbols")
-def list_file_symbols(file_id: int):
+def list_file_symbols(file_id: int, auth: AuthorizedKey = Depends(require_api_key)):
     session = storage_manager.get_session()
     try:
         f = session.query(FileModel).filter(FileModel.id == file_id).first()
         if not f:
             raise HTTPException(status_code=404, detail="File not found")
+        auth.authorize_repository(f.repo_id)
 
         return {
             "file_id": f.id,
@@ -353,7 +409,8 @@ def list_file_symbols(file_id: int):
 # 10. Get Repository Stats (GET /v1/repositories/{id}/stats)
 # -------------------------------------------------------------
 @app.get("/v1/repositories/{repo_id}/stats")
-def get_repository_stats(repo_id: int):
+def get_repository_stats(repo_id: int, auth: AuthorizedKey = Depends(require_api_key)):
+    auth.authorize_repository(repo_id)
     session = storage_manager.get_session()
     try:
         repo = session.query(RepositoryModel).filter(RepositoryModel.id == repo_id).first()
@@ -389,7 +446,8 @@ def get_repository_stats(repo_id: int):
 # 11. IDE Plugin Search (POST /v1/ide-search)
 # -------------------------------------------------------------
 @app.post("/v1/ide-search")
-def ide_search(req: IdeSearchRequest):
+def ide_search(req: IdeSearchRequest, auth: AuthorizedKey = Depends(require_api_key)):
+    auth.authorize_search_scope(req.repository_id)
     t0 = time.time()
     results = indexing_engine.search(
         req.selected_text,
@@ -419,7 +477,10 @@ def ide_search(req: IdeSearchRequest):
 # 12. Feedback (POST /v1/search/feedback)
 # -------------------------------------------------------------
 @app.post("/v1/search/feedback")
-def submit_feedback(req: FeedbackRequest):
+def submit_feedback(req: FeedbackRequest, auth: AuthorizedKey = Depends(require_api_key)):
+    # Phase 1.2: authentication only -- this endpoint has no repository_id
+    # or resolvable-to-a-repository field (search_id/result_id are opaque),
+    # so no repository-scope check is possible or required here.
     # Phase 0.7: this endpoint does not persist feedback anywhere (no
     # SearchFeedback table/row is written) and does not adjust ranking
     # weights. The previous response claimed both ("status": "recorded",
