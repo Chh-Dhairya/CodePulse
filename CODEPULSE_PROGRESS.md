@@ -27,7 +27,7 @@ Phase 0.8 — `.gitignore`/`.codepulseignore` discovery and ignore-rule handling
 | Phase 0.5 — Embedding Persistence + Hydration | COMPLETE | 58/58 full suite passed; migration applied to real `codepulse.db` | `50dbe22` |
 | Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed; no migration required | `aea7518` |
 | Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed; no migration required | `704c41d` |
-| Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | COMPLETE | 86/86 full suite passed (74 pre-existing + 12 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | COMPLETE | 86/86 full suite passed (74 pre-existing + 12 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | `b27381a` |
 | Phase 0.9 — CORS/pyproject/rich cleanup | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
@@ -115,12 +115,11 @@ Implement Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `ri
 
 ## Context Handoff Notes
 
-Phase 0.8 implementation is complete and verified in this session:
+Phase 0.8 implementation is complete, verified, and committed (`b27381a`):
 
 - What was done: audited the complete discovery pipeline first (confirmed `os.walk`-based discovery in `IndexingEngine.index_directory` step 1, with pre-existing `IGNORE_DIRS`/`IGNORE_EXTENSIONS` hardcoded filtering and directory-pruning already in place, and confirmed no `.gitignore`/`.codepulseignore` support existed at all); added `codepulse/indexer/ignore.py` (`RepositoryIgnoreRules`, built on the real `pathspec` library); integrated it into step 1's `os.walk` loop (directory pruning + file filtering, layered on top of the existing hardcoded sets); added `pathspec>=1.1.0,<1.2.0` to `pyproject.toml`; added `tests/test_ignore_discovery.py` (12 new tests against the real indexing pipeline).
-- What was verified: full suite 86/86 passed; real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
+- What was verified: full suite 86/86 passed (re-confirmed again at commit time); real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
 - No Alembic migration was created (none needed).
-- What remains: **committing this work to git** (not yet done as of this document update — the user's instructions for this milestone explicitly said not to commit), then starting Phase 0.9.
-- Exact files changed this session (uncommitted at time of writing): `codepulse/indexer/engine.py`, `pyproject.toml` (both modified); `codepulse/indexer/ignore.py`, `tests/test_ignore_discovery.py` (both new); this file updated.
+- Committed as `b27381a` (5 files changed: `codepulse/indexer/engine.py`, `pyproject.toml` modified; `codepulse/indexer/ignore.py`, `tests/test_ignore_discovery.py` new; this file updated).
 - Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 86 passed, 0 failed.
 - Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.9, starting with re-reading roadmap sprint item 0.9 ("Fix CORS policy; trim pyproject.toml; add rich; delete committed codepulse.db; git init" — note git init and codepulse.db-never-committed are already satisfied from earlier phases, so 0.9's remaining real work is CORS defaults + dependency trimming + declaring `rich`).
