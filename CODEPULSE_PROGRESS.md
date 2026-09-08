@@ -28,7 +28,7 @@ Phase 0.9 — Fix CORS policy defaults; trim `pyproject.toml`; add `rich` (verif
 | Phase 0.6 — Repository-scoped search (remove global singleton) | COMPLETE | 69/69 full suite passed; no migration required | `aea7518` |
 | Phase 0.7 — Remove fabricated metric values from API responses | COMPLETE | 74/74 full suite passed; no migration required | `704c41d` |
 | Phase 0.8 — `.gitignore`/`.codepulseignore` discovery | COMPLETE | 86/86 full suite passed; no migration required | `b27381a` |
-| Phase 0.9 — CORS defaults + `pyproject.toml` trim + `rich` | COMPLETE | 95/95 full suite passed (86 pre-existing + 9 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 0.9 — CORS defaults + `pyproject.toml` trim + `rich` | COMPLETE | 95/95 full suite passed (86 pre-existing + 9 new); no migration required; verified against the real `codepulse.db` (revision unchanged) | `8f77aaf` |
 | Phase 0.10 — Restart-survivability + idempotency test suite | NOT IMPLEMENTED | — | — |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
@@ -120,12 +120,11 @@ Implement Phase 0.10 — Restart-survivability + idempotency test suite, accordi
 
 ## Context Handoff Notes
 
-Phase 0.9 implementation is complete and verified in this session:
+Phase 0.9 implementation is complete, verified, and committed (`8f77aaf`):
 
 - What was done: audited CORS wiring (confirmed already routed through the Phase 0.1 config system, `allow_origins=["*"]` + `allow_credentials=True` default confirmed as the exact flagged invalid/insecure combination), pyproject.toml's complete dependency list, and rich's actual usage in `cli.py` (already used, never declared) before making any change. Changed `CodePulseConfig.cors_origins` default to `[]` and `cors_allow_credentials` default to `False`; added a `@model_validator` rejecting the wildcard+credentials combination permanently (not just by default); removed `redis`/`pgvector`/`psycopg[binary]` from `pyproject.toml` (confirmed unused and not even installed); kept `alembic`/`tantivy` per the roadmap's explicit instruction; added `rich>=15.0.0,<16.0.0` as an explicit dependency (no CLI code changes); added `tests/test_cors.py` (9 new tests against real HTTP response headers); updated `tests/test_config.py`'s one affected default-value assertion with the change documented in its own docstring.
-- What was verified: full suite 95/95 passed; `pip check` clean; `redis`/`psycopg`/`pgvector` confirmed absent from the dev `.venv` (never installed, zero environment impact); real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
+- What was verified: full suite 95/95 passed (re-confirmed again at commit time); `pip check` clean; `redis`/`psycopg`/`pgvector` confirmed absent from the dev `.venv` (never installed, zero environment impact); real `codepulse.db` confirmed unchanged (revision `49572f834366`, row counts 1/18/128/528/0) before and after.
 - No Alembic migration was created (none needed).
-- What remains: **committing this work to git** (not yet done as of this document update — the user's instructions for this milestone explicitly said not to commit), then starting Phase 0.10.
-- Exact files changed this session (uncommitted at time of writing): `codepulse/config.py`, `pyproject.toml`, `tests/test_config.py` (all modified); `tests/test_cors.py` (new); this file updated.
+- Committed as `8f77aaf` (5 files changed: `codepulse/config.py`, `pyproject.toml`, `tests/test_config.py` modified; `tests/test_cors.py` new; this file updated).
 - Exact tests run: `.venv/Scripts/python.exe -m pytest tests/ -v` → 95 passed, 0 failed.
 - Exact next step: follow CLAUDE.md §5's roadmap-discipline checklist for Phase 0.10, starting with re-reading roadmap §20's "Restart tests" and the Phase 0 Definition of Done, and identifying exactly which restart/idempotency scenarios are NOT already covered by existing Phase 0.3-0.5 focused tests before designing new ones (to avoid duplicating coverage that already exists).
