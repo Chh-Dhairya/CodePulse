@@ -57,6 +57,10 @@ def test_builtin_defaults_loaded():
     assert config.server_port == 8000
     assert config.cors_origins == []
     assert config.cors_allow_credentials is False
+    # Phase 1.4: in-process token-bucket rate limiter defaults.
+    assert config.rate_limit_enabled is True
+    assert config.rate_limit_requests_per_second == 5.0
+    assert config.rate_limit_burst == 20
 
 
 def test_toml_overrides_defaults():
@@ -204,12 +208,18 @@ def test_env_var_type_coercion(monkeypatch):
     monkeypatch.setenv("CODEPULSE_WEIGHT_KEYWORD", "0.65")
     monkeypatch.setenv("CODEPULSE_CORS_ALLOW_CREDENTIALS", "false")
     monkeypatch.setenv("CODEPULSE_CORS_ORIGINS", "https://foo.com, https://bar.com")
+    monkeypatch.setenv("CODEPULSE_RATE_LIMIT_ENABLED", "false")
+    monkeypatch.setenv("CODEPULSE_RATE_LIMIT_REQUESTS_PER_SECOND", "12.5")
+    monkeypatch.setenv("CODEPULSE_RATE_LIMIT_BURST", "50")
 
     config = load_config()
     assert config.server_port == 9090
     assert config.weight_keyword == 0.65
     assert config.cors_allow_credentials is False
     assert config.cors_origins == ["https://foo.com", "https://bar.com"]
+    assert config.rate_limit_enabled is False
+    assert config.rate_limit_requests_per_second == 12.5
+    assert config.rate_limit_burst == 50
 
 
 def test_components_use_configured_settings(monkeypatch):

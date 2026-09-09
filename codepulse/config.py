@@ -99,6 +99,28 @@ class CodePulseConfig(BaseModel):
         description="Whether to allow credentials in CORS headers. Defaults to False (secure by default).",
     )
 
+    # Rate Limiting (Phase 1.4)
+    rate_limit_enabled: bool = Field(
+        default=True,
+        description="Whether the in-process token-bucket rate-limiting middleware is active.",
+    )
+    rate_limit_requests_per_second: float = Field(
+        default=5.0,
+        description=(
+            "In-process token-bucket rate limiter refill rate (tokens/second) "
+            "per client identity (the raw API key header value, or the "
+            "client's IP address as a fallback for unauthenticated "
+            "requests). A reasonable starting default for local-first, "
+            "single-developer use -- NOT a benchmarked/measured figure (see "
+            "roadmap §19's own caution against presenting unvalidated "
+            "numbers as fact); tune via config/env for a given workload."
+        ),
+    )
+    rate_limit_burst: int = Field(
+        default=20,
+        description="Token-bucket capacity (max burst size) for the in-process rate limiter.",
+    )
+
     model_config = {
         "extra": "ignore",
     }
@@ -216,6 +238,9 @@ _ENV_VAR_MAPPINGS: dict[str, str] = {
     "CODEPULSE_PORT": "server_port",
     "CODEPULSE_CORS_ORIGINS": "cors_origins",
     "CODEPULSE_CORS_ALLOW_CREDENTIALS": "cors_allow_credentials",
+    "CODEPULSE_RATE_LIMIT_ENABLED": "rate_limit_enabled",
+    "CODEPULSE_RATE_LIMIT_REQUESTS_PER_SECOND": "rate_limit_requests_per_second",
+    "CODEPULSE_RATE_LIMIT_BURST": "rate_limit_burst",
 }
 
 

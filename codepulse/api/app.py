@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.jobs import create_job, get_active_job, get_job, mark_failed, mark_running, mark_succeeded
+from codepulse.rate_limit import get_limiter
 from codepulse.storage.db import (
     DependencyModel,
     FileModel,
@@ -30,6 +33,42 @@ app = FastAPI(
     description="Production-grade Semantic Codebase Intelligence Engine",
     version="1.0.0",
 )
+
+
+# -------------------------------------------------------------
+# Phase 1.4: in-process token-bucket rate limiter (roadmap §37 item 1.4;
+# backlog B11). Registered BEFORE CORSMiddleware below so that, per
+# Starlette's "last middleware added wraps outermost" rule, CORSMiddleware
+# ends up as the OUTERMOST layer -- a 429 rate-limit rejection generated
+# here still passes back out through CORSMiddleware and gets real CORS
+# headers attached, exactly as a 401/403 auth rejection already does
+# (raised even deeper, inside a route's own dependency). See
+# codepulse/rate_limit.py's module docstring for the full design
+# rationale (identity = raw API key header or client IP, in-process only,
+# no Redis, not a per-role/plan differentiated limit).
+# -------------------------------------------------------------
+@app.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next):
+    # Reads settings fresh on every request (not the module-level
+    # `settings` captured once at import time below, which CORSMiddleware
+    # itself is stuck with by construction) so tests can reconfigure rate
+    # limits via `codepulse.config.set_settings` + `reset_limiter()`.
+    current_settings = get_settings()
+    if not current_settings.rate_limit_enabled:
+        return await call_next(request)
+
+    identity = request.headers.get("X-API-Key") or (
+        request.client.host if request.client else "unknown"
+    )
+    allowed, retry_after = get_limiter().check(identity)
+    if not allowed:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+            headers={"Retry-After": str(math.ceil(retry_after))},
+        )
+    return await call_next(request)
+
 
 app.add_middleware(
     CORSMiddleware,

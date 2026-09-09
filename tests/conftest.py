@@ -11,6 +11,19 @@ SQLite database first (the pattern already established in
 `tests/test_no_fabricated_metrics.py`'s ingestion test since Phase 0.7),
 then mints a real API key against that isolated database via
 `codepulse.auth.create_api_key`.
+
+Phase 1.4 adds an autouse fixture resetting the in-process rate limiter's
+bucket state before and after every test in the whole suite (not just
+API-level ones -- it's a cheap no-op for tests that never touch the API).
+Without this, bucket state for shared identities -- most notably the
+`request.client.host` fallback bucket every *unauthenticated* request
+across the whole suite shares under Starlette's `TestClient` (which
+reports a fixed synthetic client host) -- would persist for the entire
+pytest process, risking a later test's "no key -> 401" assertion
+occasionally observing a 429 instead, depending on exactly how many such
+requests happened to run beforehand. Resetting between tests removes that
+class of flakiness entirely rather than relying on wall-clock refill
+timing to avoid it.
 """
 from __future__ import annotations
 
@@ -21,7 +34,15 @@ import pytest
 import codepulse.api.app as app_module
 from codepulse.auth import create_api_key
 from codepulse.indexer.engine import IndexingEngine
+from codepulse.rate_limit import reset_limiter
 from codepulse.storage.db import StorageManager
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    reset_limiter()
+    yield
+    reset_limiter()
 
 
 @pytest.fixture
