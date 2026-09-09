@@ -213,6 +213,56 @@ class APIKeyRepositoryModel(Base):
     api_key = relationship("APIKeyModel", back_populates="repositories")
 
 
+class IndexJobModel(Base):
+    """
+    Phase 1.3 (roadmap §37 item 1.3; §8 "Concurrency/failure handling";
+    §29 Data Model; backlog B9). Tracks one indexing run for a repository
+    through the state machine roadmap §8 describes literally: `queued ->
+    running -> succeeded|failed|cancelled`. Replaces the previous fake
+    `job_id` (`f"job_{int(time.time())}"`, no backing state at all) that
+    `/v1/repositories/index` used to return -- B9's DoD: "Returned job_id
+    is pollable to real completion" (see `GET /v1/jobs/{job_id}`).
+
+    Unlike every other model in this file, this table is NOT an
+    upsert-by-natural-key entity (no `UniqueConstraint` here) -- a job is a
+    record of one indexing *run* (an event), not an idempotent identity to
+    be reused across runs; every indexing attempt for a repository gets
+    its own row, by design, forming a run history. This does not weaken
+    the project's "idempotent indexing" invariant, which governs the
+    File/Symbol/Embedding rows an indexing run itself writes -- unaffected
+    by this table.
+
+    `cancelled` is a valid, permanent schema value (so a later
+    cancellation milestone doesn't need its own migration) but is never
+    actually written by this milestone -- no cancel flow/endpoint exists
+    yet, matching how Phase 1.1 left `APIKeyModel.revoked_at` schema-only
+    until a revoke() flow existed.
+
+    Row lifecycle logic (create / transition / query) lives in
+    `codepulse.jobs`, not here and not in `IndexingEngine` -- this table
+    tracks *orchestration* state for one indexing run, the same
+    boundary-level category as `APIKeyModel`/`AuditEvent` in the roadmap's
+    own §29 Data Model table, not a core intelligence entity.
+    """
+    __tablename__ = "index_jobs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="queued")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    # JSON-serialized copy of IndexingEngine.index_directory()'s real
+    # return dict (repository_name, total_files, total_symbols, ... -- see
+    # engine.py) once the job succeeds. Never fabricated/estimated --
+    # populated only from the actual measured result, per this project's
+    # "no fabricated metrics" invariant.
+    result_summary = Column(Text, nullable=True)
+
+    repository = relationship("RepositoryModel")
+
+
 class StorageManager:
     """Manages database connection, tables, and session lifecycle."""
 

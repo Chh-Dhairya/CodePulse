@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import Any, Optional
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
+from codepulse.jobs import create_job, get_active_job, get_job, mark_failed, mark_running, mark_succeeded
 from codepulse.storage.db import (
     DependencyModel,
     FileModel,
@@ -18,6 +20,8 @@ from codepulse.storage.db import (
     StorageManager,
     SymbolModel,
 )
+
+logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
@@ -118,25 +122,68 @@ def index_repository(
     # already-known repositories; ingestion-path safety itself -- allow-
     # listing, SSRF checks, size caps -- is explicitly Phase 1.5 / B10, not
     # this milestone). So only authentication (a valid, non-revoked key) is
-    # required here; no `auth.authorize_repository(...)` call.
-    job_id = f"job_{int(time.time())}"
+    # required here; no `auth.authorize_repository(...)` call. Unchanged
+    # by Phase 1.3.
+    repo_name = os.path.basename(req.url)
+    # Phase 1.3: resolve (or create) the real repository id up front, via
+    # the exact same natural-key resolution IndexingEngine.index_directory
+    # itself uses internally (repo_url=req.url below is truthy, so
+    # index_directory resolves to this same url too -- see
+    # IndexingEngine._resolve_repo_id's docstring). Needed so the new
+    # IndexJob row can be linked to a real repository id, and so the
+    # one-active-job-per-repository check below has something to check
+    # against, before indexing itself has actually run.
+    repo_id = indexing_engine._resolve_repo_id(repo_name, req.url)
+
+    # Phase 1.3 / roadmap §8: "one active job per repository (advisory
+    # lock on repo_id) to avoid concurrent conflicting writes." See
+    # codepulse.jobs.get_active_job's docstring for why this is an
+    # application-level check, not a hard DB constraint.
+    active = get_active_job(storage_manager, repo_id)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Repository {repo_id} already has an active indexing job "
+                f"(job_{active.id}, status={active.status})"
+            ),
+        )
+
+    job = create_job(storage_manager, repo_id)
 
     def run_indexing():
-        indexing_engine.index_directory(
-            repo_path=req.url,
-            repo_name=os.path.basename(req.url),
-            repo_url=req.url,
-        )
+        # Phase 1.3: drives the job through the roadmap §8 state machine
+        # (queued [already set by create_job above] -> running ->
+        # succeeded|failed) around the actual index_directory() call.
+        # IndexingEngine itself has no knowledge of jobs -- this
+        # orchestration lives entirely here, at the API boundary (see
+        # codepulse/jobs.py's module docstring).
+        mark_running(storage_manager, job.id)
+        try:
+            result = indexing_engine.index_directory(
+                repo_path=req.url,
+                repo_name=repo_name,
+                repo_url=req.url,
+            )
+            mark_succeeded(storage_manager, job.id, result)
+        except Exception as e:
+            logger.exception("Indexing job job_%s failed", job.id)
+            mark_failed(storage_manager, job.id, str(e))
 
     bg_tasks.add_task(run_indexing)
 
     # Phase 0.7: no `estimated_time_seconds` here -- indexing duration is
     # not measured or predicted anywhere in the system (no timing model,
     # no historical job data), so a fixed guess would be a fabricated
-    # metric. Real job progress/duration tracking is Phase 1 (IndexJob).
+    # metric.
+    # Phase 1.3: `job_id`/`status` are now real and backed by the IndexJob
+    # row just created above (pollable via GET /v1/jobs/{job_id} through
+    # to actual completion) -- replacing the previous fake
+    # `f"job_{int(time.time())}"` with no backing state at all.
     return {
-        "job_id": job_id,
-        "status": "queued",
+        "job_id": f"job_{job.id}",
+        "repository_id": repo_id,
+        "status": job.status,
         "url": req.url,
     }
 
@@ -492,4 +539,59 @@ def submit_feedback(req: FeedbackRequest, auth: AuthorizedKey = Depends(require_
         "search_id": req.search_id,
         "result_id": req.result_id,
         "message": "Feedback received. Not yet persisted or used to adjust ranking.",
+    }
+
+
+def _parse_job_id(raw: str) -> Optional[int]:
+    """
+    Phase 1.3: accepts either the `"job_<id>"` form POST
+    /v1/repositories/index returns, or a bare integer, for
+    GET /v1/jobs/{job_id}. Returns None if unparseable.
+    """
+    s = raw[len("job_"):] if raw.startswith("job_") else raw
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+
+
+# -------------------------------------------------------------
+# 13. Get Job Status (GET /v1/jobs/{job_id})
+# -------------------------------------------------------------
+@app.get("/v1/jobs/{job_id}")
+def get_job_status(job_id: str, auth: AuthorizedKey = Depends(require_api_key)):
+    """
+    Phase 1.3 (roadmap §37 item 1.3; §21: "jobs (new -- real job status,
+    replacing the fake job_id)"). Polls a real IndexJob row through to its
+    actual completion -- `status` is one of the roadmap §8 state machine's
+    values (`queued`, `running`, `succeeded`, `failed`; `cancelled` is a
+    valid schema value but unreachable in this milestone -- no cancel flow
+    exists yet, matching how Phase 1.1 left `revoked_at` schema-only).
+    `result` is populated only once `status == "succeeded"`, from the
+    real, measured return value of `IndexingEngine.index_directory()` --
+    never fabricated/estimated.
+    """
+    numeric_id = _parse_job_id(job_id)
+    if numeric_id is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job = get_job(storage_manager, numeric_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Phase 1.3: a job belongs to exactly one repository -- resolve and
+    # authorize it before returning any content, the same established
+    # Phase 1.2 pattern already used for symbol/file endpoints that
+    # resolve their owning repository via a FK rather than a direct
+    # repository_id parameter.
+    auth.authorize_repository(job.repo_id)
+
+    return {
+        "job_id": f"job_{job.id}",
+        "repository_id": job.repo_id,
+        "status": job.status,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+        "error": job.error_message,
+        "result": job.result,
     }

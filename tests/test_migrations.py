@@ -77,12 +77,13 @@ def test_fresh_database_migration_scenario_1():
             "code_embeddings",
             "api_keys",
             "api_key_repositories",
+            "index_jobs",
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the Phase 1.1 migration)
+        # Verify revision recorded (head now includes the Phase 1.3 migration)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "b0bdd63949f4"
+        assert current_rev == "de22df2fc3ce"
 
         # Verify columns on symbols table
         symbol_cols = {col["name"]: col for col in insp.get_columns("symbols")}
@@ -147,6 +148,17 @@ def test_fresh_database_migration_scenario_1():
         assert any(
             set(uc["column_names"]) == {"api_key_id", "repo_id"} for uc in api_key_repo_uniques
         ), f"Expected a UNIQUE(api_key_id, repo_id) constraint on api_key_repositories, got: {api_key_repo_uniques}"
+
+        # Verify Phase 1.3 index_jobs table
+        index_job_cols = {col["name"]: col for col in insp.get_columns("index_jobs")}
+        for expected_col in (
+            "repo_id", "status", "created_at", "started_at", "finished_at",
+            "error_message", "result_summary",
+        ):
+            assert expected_col in index_job_cols, f"Missing index_jobs.{expected_col}"
+
+        index_job_indexes = [idx["name"] for idx in insp.get_indexes("index_jobs")]
+        assert "ix_index_jobs_repo_id" in index_job_indexes
 
         # 3. Verify application connects and operates on migrated database
         storage = StorageManager(db_url=db_url)
@@ -218,7 +230,7 @@ def test_existing_database_stamping_scenario_2():
 
         # Verify alembic_version is now recorded
         current_rev = get_current_revision(db_url)
-        assert current_rev == "b0bdd63949f4"
+        assert current_rev == "de22df2fc3ce"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
@@ -827,6 +839,115 @@ def test_phase_1_1_migration_preserves_data_and_adds_api_key_tables():
                     {"h": "a" * 64, "ts": "2026-01-01 00:00:00"},
                 )
                 conn.commit()
+
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_phase_1_3_migration_preserves_data_and_adds_index_jobs_table():
+    """
+    SCENARIO 7 (Phase 1.3) — Upgrading a pre-Phase-1.3 database:
+    1. Build a database at the Phase 1.1 head (b0bdd63949f4, no
+       index_jobs table yet) and populate it with data, simulating a real
+       post-Phase-1.2 codepulse.db state.
+    2. Upgrade to the new head (de22df2fc3ce).
+    3. Verify all pre-existing rows are preserved untouched.
+    4. Verify the new `index_jobs` table exists with the expected columns/
+       index and is genuinely usable (a real insert succeeds; its FK to
+       `repositories` is honored).
+
+    Like Phase 1.1's migration, this one only CREATES a new table -- it
+    does not alter any existing table -- so there is no pre-existing-
+    duplicate-data failure mode to test here (see the migration's own
+    docstring).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        # 1. Build the Phase 1.1 schema and seed data.
+        run_migrations(db_url=db_url, revision="b0bdd63949f4")
+        assert get_current_revision(db_url) == "b0bdd63949f4"
+
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                    "VALUES (1, 1, 'phase11_repo', 'file:///phase11/path', 1, 1)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO files (id, repo_id, path, language, size_bytes, line_count, content_hash) "
+                    "VALUES (1, 1, 'main.py', 'python', 42, 5, 'deadbeef')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO symbols (id, file_id, name, type, start_line, end_line, language, body_hash) "
+                    "VALUES (1, 1, 'existing_func', 'function', 1, 5, 'python', 'abc123')"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO api_keys (id, name, key_hash, key_prefix, created_at) "
+                    "VALUES (1, 'existing-key', :h, 'cpk_aaaaaaaa', :ts)"
+                ),
+                {"h": "b" * 64, "ts": "2026-01-01 00:00:00"},
+            )
+            conn.commit()
+
+        # 2. Upgrade to the Phase 1.3 revision specifically (not generic
+        #    "head" -- this test targets that one migration step in
+        #    isolation, and must keep doing so as later migrations are added).
+        run_migrations(db_url=db_url, revision="de22df2fc3ce")
+        assert get_current_revision(db_url) == "de22df2fc3ce"
+
+        # 3. Pre-existing data preserved untouched.
+        with engine.connect() as conn:
+            repo_count = conn.execute(text("SELECT count(*) FROM repositories")).scalar()
+            file_count = conn.execute(text("SELECT count(*) FROM files")).scalar()
+            symbol_count = conn.execute(text("SELECT count(*) FROM symbols")).scalar()
+            api_key_count = conn.execute(text("SELECT count(*) FROM api_keys")).scalar()
+            assert (repo_count, file_count, symbol_count, api_key_count) == (1, 1, 1, 1)
+
+        # 4. New table exists, is correctly shaped, and is genuinely usable.
+        insp = inspect(engine)
+        assert "index_jobs" in insp.get_table_names()
+
+        index_job_cols = {col["name"] for col in insp.get_columns("index_jobs")}
+        assert {
+            "id", "repo_id", "status", "created_at", "started_at",
+            "finished_at", "error_message", "result_summary",
+        }.issubset(index_job_cols)
+
+        index_job_indexes = [idx["name"] for idx in insp.get_indexes("index_jobs")]
+        assert "ix_index_jobs_repo_id" in index_job_indexes
+
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO index_jobs (id, repo_id, status, created_at) "
+                    "VALUES (1, 1, 'queued', :ts)"
+                ),
+                {"ts": "2026-01-01 00:00:00"},
+            )
+            conn.commit()
+
+            job_count = conn.execute(text("SELECT count(*) FROM index_jobs")).scalar()
+            assert job_count == 1
 
     finally:
         if engine is not None:
