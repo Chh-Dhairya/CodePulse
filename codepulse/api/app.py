@@ -8,9 +8,9 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from codepulse.api.errors import error_json_response, install_error_handlers
 from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
@@ -34,6 +34,13 @@ app = FastAPI(
     description="Production-grade Semantic Codebase Intelligence Engine",
     version="1.0.0",
 )
+
+# Phase 1.6 / roadmap §21: "Errors follow a single shape:
+# {"error": {"code", "message", "details"}}" -- registered once, here,
+# so every HTTPException/validation-error/unhandled-exception response
+# across every endpoint is reshaped centrally. See
+# codepulse/api/errors.py's module docstring for the full design.
+install_error_handlers(app)
 
 
 # -------------------------------------------------------------
@@ -63,10 +70,17 @@ async def _rate_limit_middleware(request: Request, call_next):
     )
     allowed, retry_after = get_limiter().check(identity)
     if not allowed:
-        return JSONResponse(
-            status_code=429,
-            content={"detail": "Rate limit exceeded. Try again later."},
-            headers={"Retry-After": str(math.ceil(retry_after))},
+        # Phase 1.6: built via the same shared error_json_response helper
+        # the app's global exception handlers use -- see
+        # codepulse/api/errors.py's module docstring for why this
+        # middleware can't just `raise HTTPException(...)` and rely on
+        # those handlers to catch it.
+        retry_after_seconds = math.ceil(retry_after)
+        return error_json_response(
+            429,
+            "Rate limit exceeded. Try again later.",
+            {"retry_after_seconds": retry_after_seconds},
+            headers={"Retry-After": str(retry_after_seconds)},
         )
     return await call_next(request)
 

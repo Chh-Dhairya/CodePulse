@@ -84,7 +84,14 @@ def test_exceeding_burst_returns_429_with_retry_after(client, isolated_app, tigh
     retry_after = response.headers.get("retry-after")
     assert retry_after is not None
     assert int(retry_after) > 0
-    assert "rate limit" in response.json()["detail"].lower()
+    # Phase 1.6: the structured {"error": {"code", "message", "details"}}
+    # envelope replaces the old plain {"detail": "..."} shape -- and the
+    # same real retry_after value used for the header is also surfaced in
+    # `details`, not just fabricated/duplicated separately.
+    body = response.json()
+    assert "rate limit" in body["error"]["message"].lower()
+    assert body["error"]["code"] == "too_many_requests"
+    assert body["error"]["details"]["retry_after_seconds"] == int(retry_after)
 
 
 # --- Independent limits per identity -------------------------------------------

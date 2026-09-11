@@ -69,7 +69,10 @@ def test_git_source_with_ssrf_unsafe_host_is_rejected(client, isolated_app):
         headers=headers,
     )
     assert response.status_code == 400
-    assert "ssrf" in response.json()["detail"].lower() or "private" in response.json()["detail"].lower()
+    # Phase 1.6: the structured {"error": {"code", "message", "details"}}
+    # envelope replaces the old plain {"detail": "..."} shape.
+    message = response.json()["error"]["message"].lower()
+    assert "ssrf" in message or "private" in message
 
 
 def test_git_source_with_bad_scheme_is_rejected(client, isolated_app):
