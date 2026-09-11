@@ -121,6 +121,47 @@ class CodePulseConfig(BaseModel):
         description="Token-bucket capacity (max burst size) for the in-process rate limiter.",
     )
 
+    # Ingestion Safety (Phase 1.5)
+    ingestion_allowed_roots: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allow-list of root directories local-path ingestion (POST "
+            "/v1/repositories/index) is restricted to. Empty by default -- "
+            "meaning UNRESTRICTED -- deliberately preserving the roadmap's "
+            "own local-first default experience ('codepulse index .' works "
+            "with zero configuration): this endpoint acts on behalf of the "
+            "local user who already has filesystem access to their own "
+            "machine, so there is nothing to protect against until this API "
+            "is exposed beyond localhost with a key untrusted parties might "
+            "hold (roadmap §15's stated concern for this setting). Configure "
+            "one or more roots via codepulse.toml/the "
+            "CODEPULSE_INGESTION_ALLOWED_ROOTS env var to restrict ingestion "
+            "for a server/team deployment; when set, a request path that "
+            "resolves (after following symlinks and collapsing '..') outside "
+            "every configured root is rejected."
+        ),
+    )
+    ingestion_max_files_per_repo: int = Field(
+        default=50000,
+        description=(
+            "Maximum number of discoverable files a single indexing run will "
+            "accept before refusing to proceed (roadmap §15: 'max files per "
+            "repo'). A generous starting ceiling, NOT a benchmarked figure -- "
+            "tune via config for your workload."
+        ),
+    )
+    ingestion_max_file_size_bytes: int = Field(
+        default=5_000_000,
+        description=(
+            "Maximum size, in bytes, of a single file that will be read and "
+            "parsed during indexing (roadmap §15: 'max file size parsed'). A "
+            "larger file is skipped (logged, not fatal to the run -- the "
+            "same per-file error-tolerance already established for "
+            "malformed/unparseable files), not truncated. A reasonable "
+            "starting default, NOT a benchmarked figure."
+        ),
+    )
+
     model_config = {
         "extra": "ignore",
     }
@@ -241,6 +282,9 @@ _ENV_VAR_MAPPINGS: dict[str, str] = {
     "CODEPULSE_RATE_LIMIT_ENABLED": "rate_limit_enabled",
     "CODEPULSE_RATE_LIMIT_REQUESTS_PER_SECOND": "rate_limit_requests_per_second",
     "CODEPULSE_RATE_LIMIT_BURST": "rate_limit_burst",
+    "CODEPULSE_INGESTION_ALLOWED_ROOTS": "ingestion_allowed_roots",
+    "CODEPULSE_INGESTION_MAX_FILES_PER_REPO": "ingestion_max_files_per_repo",
+    "CODEPULSE_INGESTION_MAX_FILE_SIZE_BYTES": "ingestion_max_file_size_bytes",
 }
 
 

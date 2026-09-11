@@ -12,6 +12,7 @@ import numpy as np
 from codepulse.embeddings.chunker import CodeChunk, SemanticChunker
 from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableError
 from codepulse.indexer.ignore import RepositoryIgnoreRules
+from codepulse.ingestion_safety import IngestionSafetyError
 from codepulse.models import FileParseResult, Symbol, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
@@ -201,6 +202,26 @@ class IndexingEngine:
         total_files = len(all_files)
         logger.info("Found %d files to examine in '%s'", total_files, repo_path)
 
+        # Phase 1.5 / roadmap §15: "max files per repo" resource limit --
+        # checked here (after discovery, before parsing/embedding, the
+        # expensive part) rather than via a second pre-flight walk at the
+        # API boundary, to avoid duplicating this exact discovery loop
+        # (see codepulse/ingestion_safety.py's module docstring for why).
+        # Raising here surfaces as a real, non-fabricated "failed" job
+        # status (codepulse.jobs.mark_failed, called from the caller's own
+        # except block) rather than a fabricated success.
+        from codepulse.config import get_settings
+
+        _ingestion_settings = get_settings()
+        max_files = _ingestion_settings.ingestion_max_files_per_repo
+        max_file_size = _ingestion_settings.ingestion_max_file_size_bytes
+        if total_files > max_files:
+            raise IngestionSafetyError(
+                f"Repository at '{repo_path}' has {total_files} discoverable "
+                f"files, exceeding the configured ingestion_max_files_per_repo "
+                f"limit of {max_files}"
+            )
+
         parsed_files: list[FileParseResult] = []
         all_symbols: list[Symbol] = []
         all_chunks: list[CodeChunk] = []
@@ -219,6 +240,24 @@ class IndexingEngine:
 
             parser = get_parser_for_file(file_path)
             if not parser:
+                continue
+
+            # Phase 1.5 / roadmap §15: "max file size parsed" resource
+            # limit. A single oversized file is skipped (logged, not
+            # fatal to the run) -- the same per-file error-tolerance
+            # already established for malformed/unparseable files just
+            # below, not a new failure mode.
+            try:
+                file_size = os.path.getsize(file_path)
+            except OSError:
+                file_size = 0
+            if file_size > max_file_size:
+                logger.warning(
+                    "Skipping oversized file '%s' (%d bytes > limit %d)",
+                    rel_path,
+                    file_size,
+                    max_file_size,
+                )
                 continue
 
             try:

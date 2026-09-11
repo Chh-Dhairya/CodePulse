@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
+from codepulse.ingestion_safety import IngestionSafetyError, validate_git_url, validate_local_path
 from codepulse.jobs import create_job, get_active_job, get_job, mark_failed, mark_running, mark_succeeded
 from codepulse.rate_limit import get_limiter
 from codepulse.storage.db import (
@@ -158,11 +159,45 @@ def index_repository(
     # Phase 1.2: this endpoint creates/re-indexes a repository -- there is
     # no *existing* repository scope to check a not-yet-indexed path
     # against (the roadmap's repository-scoping model authorizes access to
-    # already-known repositories; ingestion-path safety itself -- allow-
-    # listing, SSRF checks, size caps -- is explicitly Phase 1.5 / B10, not
-    # this milestone). So only authentication (a valid, non-revoked key) is
-    # required here; no `auth.authorize_repository(...)` call. Unchanged
-    # by Phase 1.3.
+    # already-known repositories). So only authentication (a valid,
+    # non-revoked key) is required here; no `auth.authorize_repository(...)`
+    # call. Unchanged by Phase 1.3/1.5.
+
+    # Phase 1.5 / roadmap §15: git-URL ingestion safety (SSRF check).
+    # This codebase has no git-clone implementation at all (grep-confirmed
+    # -- see codepulse/ingestion_safety.py's module docstring for the full
+    # rationale): `req.source` has always been accepted but never actually
+    # branched on, so a non-"local" source previously fell through to
+    # silently mis-treating a git URL as a local path (indexing zero files
+    # while claiming "queued"). This milestone's job is the SSRF check
+    # itself -- a real, independently-tested safety primitive -- not
+    # inventing git-URL fetching, which no sprint item assigns to any
+    # milestone. So an unsafe URL is rejected here (400) even though the
+    # feature isn't implemented; a *safe* URL still gets an honest 501
+    # rather than being silently mishandled.
+    if req.source != "local":
+        try:
+            validate_git_url(req.url)
+        except IngestionSafetyError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"Ingestion source '{req.source}' is not implemented; only "
+                f"source='local' is currently supported."
+            ),
+        )
+
+    # Phase 1.5 / roadmap §15: local-path ingestion safety -- allow-list
+    # containment + `..`-traversal/symlink-escape rejection. See
+    # codepulse.ingestion_safety.validate_local_path's docstring; an empty
+    # (default) ingestion_allowed_roots means unrestricted, preserving the
+    # local-first zero-configuration experience.
+    try:
+        resolved_path = validate_local_path(req.url, get_settings().ingestion_allowed_roots)
+    except IngestionSafetyError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     repo_name = os.path.basename(req.url)
     # Phase 1.3: resolve (or create) the real repository id up front, via
     # the exact same natural-key resolution IndexingEngine.index_directory
@@ -171,7 +206,10 @@ def index_repository(
     # IndexingEngine._resolve_repo_id's docstring). Needed so the new
     # IndexJob row can be linked to a real repository id, and so the
     # one-active-job-per-repository check below has something to check
-    # against, before indexing itself has actually run.
+    # against, before indexing itself has actually run. Deliberately still
+    # keyed on req.url (not resolved_path) -- unchanged natural-key
+    # identity from Phase 1.3; only the actual filesystem walk below uses
+    # the safety-verified, canonicalized resolved_path.
     repo_id = indexing_engine._resolve_repo_id(repo_name, req.url)
 
     # Phase 1.3 / roadmap §8: "one active job per repository (advisory
@@ -200,12 +238,18 @@ def index_repository(
         mark_running(storage_manager, job.id)
         try:
             result = indexing_engine.index_directory(
-                repo_path=req.url,
+                repo_path=resolved_path,
                 repo_name=repo_name,
                 repo_url=req.url,
             )
             mark_succeeded(storage_manager, job.id, result)
         except Exception as e:
+            # Phase 1.5: this also catches IngestionSafetyError raised
+            # inside index_directory() for the "max files per repo" cap
+            # (discoverable only after the walk, so it can't be checked
+            # synchronously up front the way the allow-list/SSRF checks
+            # above are) -- surfaced as a real "failed" job with the real
+            # error message, never a fabricated success.
             logger.exception("Indexing job job_%s failed", job.id)
             mark_failed(storage_manager, job.id, str(e))
 

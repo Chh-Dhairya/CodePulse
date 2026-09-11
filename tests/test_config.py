@@ -61,6 +61,11 @@ def test_builtin_defaults_loaded():
     assert config.rate_limit_enabled is True
     assert config.rate_limit_requests_per_second == 5.0
     assert config.rate_limit_burst == 20
+    # Phase 1.5: ingestion safety defaults (unrestricted allow-list by
+    # design -- see CodePulseConfig.ingestion_allowed_roots's docstring).
+    assert config.ingestion_allowed_roots == []
+    assert config.ingestion_max_files_per_repo == 50000
+    assert config.ingestion_max_file_size_bytes == 5_000_000
 
 
 def test_toml_overrides_defaults():
@@ -211,6 +216,9 @@ def test_env_var_type_coercion(monkeypatch):
     monkeypatch.setenv("CODEPULSE_RATE_LIMIT_ENABLED", "false")
     monkeypatch.setenv("CODEPULSE_RATE_LIMIT_REQUESTS_PER_SECOND", "12.5")
     monkeypatch.setenv("CODEPULSE_RATE_LIMIT_BURST", "50")
+    monkeypatch.setenv("CODEPULSE_INGESTION_ALLOWED_ROOTS", "/repos/allowed, /repos/also-allowed")
+    monkeypatch.setenv("CODEPULSE_INGESTION_MAX_FILES_PER_REPO", "1234")
+    monkeypatch.setenv("CODEPULSE_INGESTION_MAX_FILE_SIZE_BYTES", "999")
 
     config = load_config()
     assert config.server_port == 9090
@@ -220,6 +228,9 @@ def test_env_var_type_coercion(monkeypatch):
     assert config.rate_limit_enabled is False
     assert config.rate_limit_requests_per_second == 12.5
     assert config.rate_limit_burst == 50
+    assert config.ingestion_allowed_roots == ["/repos/allowed", "/repos/also-allowed"]
+    assert config.ingestion_max_files_per_repo == 1234
+    assert config.ingestion_max_file_size_bytes == 999
 
 
 def test_components_use_configured_settings(monkeypatch):
