@@ -6,15 +6,15 @@
 
 ## Current Phase
 
-Phase 1 — Production Core (sixth sprint item complete)
+Phase 1 — Production Core (all seven sprint items complete)
 
 ## Current Milestone
 
-None actively in progress. **Phase 1.6 is complete and verified.** Awaiting explicit instruction to begin Phase 1.7 (security test suite) — do not start it opportunistically.
+None actively in progress. **Phase 1.7 is complete and verified.** Phase 1 (1.1-1.7) is now fully implemented per its sprint list. Awaiting explicit instruction to begin Phase 2 — do not start it opportunistically.
 
 ## Last Completed Milestone
 
-Phase 1.6 — Structured error response format across all endpoints (verified COMPLETE)
+Phase 1.7 — Security test suite (verified COMPLETE)
 
 ## Completed Milestones
 
@@ -35,11 +35,27 @@ Phase 1.6 — Structured error response format across all endpoints (verified CO
 | Phase 1.3 — IndexJob state machine + `/v1/jobs/{id}` | COMPLETE | 165/165 full suite passed (139 pre-existing + 26 new); migration applied to real `codepulse.db` (via stamp, see incident note below); re-verified post-commit (clean status, 165/165) | `3feabf8` (+ docs follow-up `c9d27fa`) |
 | Phase 1.4 — In-process token-bucket rate limiter | COMPLETE | 179/179 full suite passed (165 pre-existing + 14 new); no migration required; real `codepulse.db` untouched; re-verified post-commit (clean status, 179/179) | `571cf3a` (+ docs follow-up `b80c776`) |
 | Phase 1.5 — Ingestion safety: path allow-list, SSRF check, size caps | COMPLETE | 204/204 full suite passed + 1 environment-driven skip (179 pre-existing + 25 new); audited requirement-by-requirement against the roadmap before commit; one disclosed specification ambiguity (see Known Issues); no migration required; real `codepulse.db` untouched | `0a51697` |
-| Phase 1.6 — Structured error response format across all endpoints | COMPLETE | 215/215 full suite passed + 1 environment-driven skip (204 pre-existing + 11 new); no migration required; real `codepulse.db` untouched | *(uncommitted as of this update — see Exact Next Action)* |
+| Phase 1.6 — Structured error response format across all endpoints | COMPLETE | 215/215 full suite passed + 1 environment-driven skip (204 pre-existing + 11 new); no migration required; real `codepulse.db` untouched | `1ff8ff2` |
+| Phase 1.7 — Security test suite | COMPLETE | 224/224 full suite passed + 1 environment-driven skip (215 pre-existing + 9 new); test-only, no production code changed; no migration required; real `codepulse.db` untouched | *(uncommitted as of this update — see Exact Next Action)* |
 
 Only mark a milestone COMPLETE here after actual verification (tests run, diff inspected, roadmap cross-checked) — not because code merely exists.
 
 ## Current Implementation State
+
+### Phase 1.7 — Security test suite
+
+- **Scope determined from the roadmap's own text.** §37 item 1.7's title is exactly "Security test suite" -- no elaboration in that line, and (like Phase 1.6) **no dedicated backlog (§45) row exists for this item either** (the backlog jumps B10 → B11 → B12, skipping straight from Phase 1 to Phase 2). The actual itemized content comes from §20 Testing Strategy's literal "Security tests" bullet: *"unauthenticated request rejected; path traversal in ingestion path rejected; SSRF URL rejected; oversized repo rejected"* -- plus §36 Phase 1's own DoD: *"no endpoint is callable without a key..."* and §21: *"Every endpoint requires an API key ... except `/health/*`"* (no `/health/*` exists yet). A dedicated read-only specification-gate pass was run before any test was written, producing a full requirement-by-requirement audit (quoted authoritative text, explicit vs. inferred behavior, per-endpoint coverage table) -- summarized below, full detail in this session's own transcript.
+- **Key finding from that audit**: three of §20's four categories were **already fully satisfied** by existing, passing tests -- verified by direct inspection, not assumed:
+  - "path traversal in ingestion path rejected" -- `tests/test_ingestion_safety.py` (Phase 1.5).
+  - "SSRF URL rejected" -- `tests/test_ingestion_safety.py` + `tests/test_ingestion_safety_endpoint.py` (Phase 1.5).
+  - "oversized repo rejected" -- `tests/test_ingestion_safety_endpoint.py`'s file-count-cap tests (Phase 1.5).
+  The fourth category, "unauthenticated request rejected," had a **precisely-bounded real gap**: of the app's 13 routes, only 4 (`/v1/repositories/index`, `/v1/repositories/{id}/index-status`, `/v1/autocomplete`, `/v1/jobs/{id}`) had an endpoint-specific test proving a keyless request returns 401, even though `Depends(require_api_key)` (Phase 1.2) is already wired into, and already correctly rejects on, all 13. The other 9 -- `/v1/search`, `/v1/symbols/{id}`, `/v1/symbols/{id}/similar`, `/v1/symbols/{id}/impact-analysis`, `/v1/symbols/{id}/search`, `/v1/files/{id}/symbols`, `/v1/repositories/{id}/stats`, `/v1/ide-search`, `/v1/search/feedback` -- did not, which is a direct, literal gap against §36's own wording, "**no endpoint** is callable without a key."
+- **IN scope (implemented)**: exactly nine new test functions in the existing `tests/test_api_authorization.py` (the topical module this behavior already belongs to), one per gap endpoint above, each making a syntactically valid, keyless request and asserting `response.status_code == 401`. **Zero production code was changed** -- the behavior being proven was already correct; this milestone only adds the missing proof, mirroring Phase 0.10's own established precedent for a "test suite"-titled milestone (pure validation, zero production changes).
+- **OUT of scope (explicitly NOT done)**: no `tests/test_security.py` or any other new wrapper/consolidation file was created -- the roadmap's "security test suite" is read as the *collection* of security-relevant tests already spread across their natural topical homes (`test_api_authorization.py` for auth, `test_ingestion_safety*.py` for traversal/SSRF/oversized-repo), not a mandate for one physical file; no duplication of Phase 1.5's traversal/SSRF/oversized-repo tests; no re-assertion of Phase 1.6's structured-error-envelope shape (1.6 already owns that contract -- these new tests check only the status code, per this milestone's own explicit instruction not to duplicate 1.6's coverage); no change to authentication, authorization, ingestion safety, rate limiting, error formatting, CLI, or MCP behavior; no database/config/migration changes.
+- **Two logged, disclosed, non-blocking design/interpretation notes from the specification-gate audit** (surfaced explicitly, not silently decided):
+  1. §36 Phase 1's own "Tests:" summary line separately mentions "job lifecycle tests" alongside security tests -- read as a retrospective description of what Phase 1.3 already delivered (~25 job-lifecycle tests across `test_index_jobs.py`/`test_job_endpoints.py`), not a new 1.7 obligation, since no additional job-lifecycle behavior is named anywhere for 1.7 specifically.
+  2. "Oversized repo rejected" (§20) is read as mapping to the file-*count* cap (which fails/rejects the job) rather than the per-file-*size* cap (which skips one file, job still succeeds) -- the literal word "rejected" matches only the former; per this milestone's own explicit instruction, the per-file-size skip behavior was not treated as something to change.
+- **Architecture preserved**: intelligence core, CLI, MCP (nonexistent), config, and database are all untouched, confirmed by `git diff --stat` showing exactly one file changed.
 
 ### Phase 1.6 — Structured error response format across all endpoints
 
@@ -78,24 +94,23 @@ While running an ad-hoc Python one-liner to sanity-check new routes (`import cod
 ## Database State
 
 - `codepulse.db` exists at the repository root, untracked by git.
-- **Current Alembic revision (real `codepulse.db`): `de22df2fc3ce`** -- **unchanged by Phase 1.6**. No migration was created, needed, or considered: this milestone adds only application-layer HTTP-response-shaping logic, no new table or column.
-- Row counts, confirmed **unchanged**: `repositories` = 1, `files` = 18, `symbols` = 128, `dependencies` = 528, `code_embeddings` = 0, `api_keys` = 0, `api_key_repositories` = 0, `index_jobs` = 0.
-- The real `codepulse.db` was not written to or read from by any test during this milestone -- every test uses the shared `isolated_app` fixture (a `tmp_path`-based temporary SQLite database).
+- **Current Alembic revision (real `codepulse.db`): `de22df2fc3ce`** -- **unchanged by Phase 1.7**. No migration was created, needed, or considered: this milestone is test-only.
+- Row counts, confirmed **unchanged** immediately before and after this milestone's work: `repositories` = 1, `files` = 18, `symbols` = 128, `dependencies` = 528, `code_embeddings` = 0, `api_keys` = 0, `api_key_repositories` = 0, `index_jobs` = 0.
+- The real `codepulse.db` was not written to or read from by any test during this milestone -- the 9 new tests use the shared `isolated_app` fixture, matching every other test in the file they were added to.
 
 ## Test State
 
-- Last full suite result: **215 passed, 1 skipped, 13 warnings** (`.venv/Scripts/python.exe -m pytest -q`), ~202s. The 1 skip is the same pre-existing, environment-driven `test_symlink_escaping_the_allowed_root_is_rejected` from Phase 1.5 (this Windows box lacks `SeCreateSymbolicLinkPrivilege`) -- unrelated to and unaffected by this milestone.
-- New focused Phase 1.6 tests: `tests/test_error_format.py` (11 tests) -- real HTTP behavior proving every distinct error class uses the single `{"error": {"code", "message", "details"}}` envelope: 401 (missing/unknown key), 403 (wrong scope), 404 (not found), 409 (concurrency lock), 429 (rate limit, with `details.retry_after_seconds` matching the real `Retry-After` header value exactly), 501 (unsupported git ingestion), 400 (bad ingestion path), 422 (FastAPI's own automatic validation failure, with the real Pydantic error list in `details.errors`), and 500 (a deliberately-triggered unhandled exception, proving the client-facing message stays generic and the real exception text never leaks into the response body) -- plus a regression guard that a normal 200 success response is never wrapped in the error envelope.
-- 2 pre-existing test assertions updated (not new tests) to check the new shape instead of the old `{"detail": ...}` one: `tests/test_ingestion_safety_endpoint.py::test_git_source_with_ssrf_unsafe_host_is_rejected`, `tests/test_rate_limit_middleware.py::test_exceeding_burst_returns_429_with_retry_after` (the latter also gained an assertion that `details.retry_after_seconds` matches the header).
-- All 204 pre-existing tests (203 passed + 1 skipped) re-run unchanged otherwise and pass, confirming no regression to Phase 0.1-0.10/1.1-1.5 behavior.
+- Last full suite result: **224 passed, 1 skipped, 13 warnings** (`.venv/Scripts/python.exe -m pytest -q`), ~180s -- exactly 215 + 9, matching the specification gate's own prediction precisely. The 1 skip is the same pre-existing, environment-driven `test_symlink_escaping_the_allowed_root_is_rejected` from Phase 1.5 -- unrelated to and unaffected by this milestone.
+- New focused Phase 1.7 tests, all in `tests/test_api_authorization.py` (no new file): `test_search_rejected_without_any_key`, `test_symbol_details_rejected_without_any_key`, `test_symbol_similar_rejected_without_any_key`, `test_symbol_impact_analysis_rejected_without_any_key`, `test_symbol_within_search_rejected_without_any_key`, `test_file_symbols_rejected_without_any_key`, `test_repository_stats_rejected_without_any_key`, `test_ide_search_rejected_without_any_key`, `test_feedback_rejected_without_any_key` -- one per previously-uncovered endpoint, each asserting only `response.status_code == 401` (deliberately not re-asserting the Phase 1.6 error-envelope shape, which that milestone already owns).
+- All 215 pre-existing tests (214 passed + 1 skipped) re-run unchanged and pass, confirming no regression to Phase 0.1-0.10/1.1-1.6 behavior. No existing test was modified.
 - No existing test was weakened or deleted; the 1 skip is the same pre-existing, unrelated, environment-driven one from Phase 1.5.
 - Known warnings: `StarletteDeprecationWarning` (httpx/TestClient) and `FutureWarning`s from `tree_sitter` -- pre-existing, not addressed (out of scope).
 
 ## Known Issues
 
-**Roadmap work remaining:** Phase 1.6 (structured error response format) is complete. Next per the roadmap's own sprint order (§37) is **Phase 1.7 — security test suite**, the last Phase 1 item. **None of Phase 1.7 has been started or implemented — do not infer it exists.**
+**Roadmap work remaining:** Phase 1.7 (security test suite) is complete. **Phase 1 (1.1-1.7) is now fully implemented per its sprint list.** Next per the roadmap's own sprint order (§37) is **Phase 2** (Tantivy-backed lexical index, embedded ANN vector index, RRF fusion selectability, relevance evaluation harness, benchmarking). **None of Phase 2 has been started or implemented — do not infer it exists.**
 
-**Known technical debt (unchanged from Phase 1.5, re-verified still accurate unless noted):**
+**Known technical debt (unchanged from Phase 1.6, re-verified still accurate unless noted):**
 - `StorageManager.create_tables()` still unconditionally calls `Base.metadata.create_all()` alongside Alembic -- demonstrated risk (Phase 1.3's incident), still not fixed. Recommend prioritizing a fix before it causes a real problem outside a disposable/test context.
 - SQLite's `PRAGMA foreign_keys` is never enabled anywhere in this codebase, so every `ON DELETE CASCADE` clause declared in the schema is not actually enforced by SQLite itself. No repository-deletion endpoint exists yet, so this has no current user-facing impact.
 - `SymbolType.VARIABLE` / `SymbolType.INTERFACE` enum values defined but never produced by either parser.
@@ -118,8 +133,11 @@ While running an ad-hoc Python one-liner to sanity-check new routes (`import cod
 - **Open, disclosed specification ambiguity from Phase 1.5, still unresolved by the user as of this update:** whether an unconfigured `ingestion_allowed_roots` should mean unrestricted (current, shipped behavior) or deny-all-until-configured. A dedicated compliance review during Phase 1.5 concluded this is a genuine `SPECIFICATION AMBIGUITY` -- neither the roadmap nor CLAUDE.md states it explicitly either way, and real textual evidence exists on both sides. Shipped as unrestricted, disclosed as a judgment call, not a claimed exact-compliance fact. Not touched by Phase 1.6.
 - **New from Phase 1.6 (not a defect, a scope note):** the 500 handler's generic client-facing message ("Internal server error") deliberately omits the real exception type/text to avoid an information-disclosure regression; the real exception is only visible server-side via `logger.exception`. If deeper client-visible diagnostics are ever wanted, that would need its own deliberate scoping (e.g. an opt-in debug mode), not silently added later.
 - **New from Phase 1.6 (not a defect, a scope note):** `Starlette`'s `TestClient` defaults to `raise_server_exceptions=True`, which re-raises a genuinely unhandled exception to the calling test even when the app's own exception handler already produced a clean response. Any *future* test that deliberately triggers a 500 to inspect its body must construct its `TestClient` with `raise_server_exceptions=False`, matching `tests/test_error_format.py`'s own `client_no_reraise` fixture -- otherwise the test will see the raw exception instead of the structured response.
+- **New from Phase 1.7 (not a defect, a design/interpretation note, disclosed rather than silently decided):** §36 Phase 1's "Tests:" summary line separately names "job lifecycle tests" alongside security tests; this was read as describing what Phase 1.3 already delivered, not a new obligation for 1.7, since no additional job-lifecycle behavior is named anywhere specifically for 1.7. If that reading is wrong, no job-lifecycle test gap has been re-audited under this milestone's name.
+- **New from Phase 1.7 (not a defect, a design/interpretation note):** "oversized repo rejected" (§20) was read as mapping only to the file-*count* cap (which fails the job) since that is the one behavior that literally matches the word "rejected" -- the per-file-*size* cap's "skip, job still succeeds" behavior (a deliberate Phase 1.5 design decision) was left as-is, per this milestone's own explicit instruction not to treat it as something to change.
+- **New from Phase 1.7 (not a defect, an organizational note):** no dedicated `tests/test_security.py` was created. "Security test suite" was read as the *collection* of security-relevant tests in their natural topical homes (`test_api_authorization.py`, `test_ingestion_safety*.py`), not a mandate for one physical file -- the roadmap does not state which reading is correct.
 
-**Blockers:** none currently known for starting Phase 1.7.
+**Blockers:** none currently known for starting Phase 2.
 
 ## Deferred Work
 
@@ -128,8 +146,7 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 - Kubernetes, Redis, distributed workers, microservices
 - Enterprise SSO, full organization/user tenancy
 - Learned/adaptive ranking, LLM reranking, LLM-generated explanations as source of truth
-- PostgreSQL/pgvector, Tantivy-backed lexical index, embedded ANN vector index (Phase 2)
-- Security test suite (Phase 1.7)
+- PostgreSQL/pgvector, Tantivy-backed lexical index, embedded ANN vector index, RRF fusion selectability, relevance evaluation harness, benchmarking (Phase 2)
 - Actual git-URL cloning/fetching; request-body size caps; a global/per-tenant concurrent-job cap (distinct from Phase 1.3's per-repository lock) -- none assigned a milestone anywhere in this roadmap
 - `RepositorySnapshot` / git-diff incremental indexing / rename detection / heartbeat-based job reaper (Phase 3, roadmap §9/§17)
 - Role-based permissions (viewer/indexer/admin) on API keys (Phase 7 / B25)
@@ -141,30 +158,31 @@ Per roadmap §39 — do not implement until the roadmap explicitly reaches these
 
 ## Current Risks
 
-- `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 1.6.
+- `_persist_to_db` still has four upsert blocks plus the dependency-insert block in one function/session — unchanged by Phase 1.7.
 - The `languages`/fallback-counts repository-isolation gap (Phase 0.7 finding) remains unfixed at the data level.
-- `StorageManager.create_tables()`'s `create_all()`-alongside-Alembic behavior remains a demonstrated real risk (Phase 1.3's incident) -- unchanged by Phase 1.6, which introduced no new model.
+- `StorageManager.create_tables()`'s `create_all()`-alongside-Alembic behavior remains a demonstrated real risk (Phase 1.3's incident) -- unchanged by Phase 1.7, which introduced no new model.
 - Rate-limit identity evasion via key rotation (Phase 1.4) means the limiter is a resource-exhaustion speed bump, not a strong anti-abuse guarantee.
-- `ingestion_allowed_roots`'s unrestricted-by-default behavior (Phase 1.5) remains an open, disclosed specification ambiguity, not yet resolved by the user.
+- `ingestion_allowed_roots`'s unrestricted-by-default behavior (Phase 1.5) remains an open, disclosed specification ambiguity, not yet resolved by the user. Phase 1.7 was explicitly instructed not to resolve it and did not.
 - `validate_git_url`'s SSRF check has no live fetch path to protect yet -- do not describe git-URL ingestion as supported.
-- Whoever starts Phase 1.7 should re-verify this document against the actual repository per CLAUDE.md §13 before trusting it, as always.
+- Whoever starts Phase 2 should re-verify this document against the actual repository per CLAUDE.md §13 before trusting it, as always.
 
 ## Exact Next Action
 
 NEXT ACTION:
-Phase 1.1 (`190d9bb`), Phase 1.2 (`a3a9b24`/`16fa747`), Phase 1.3 (`3feabf8`/`c9d27fa`), Phase 1.4 (`571cf3a`/`b80c776`), and Phase 1.5 (`0a51697`) are committed and independently verified. Next, begin Phase 1.7 — security test suite (§37; the last Phase 1 sprint item; roadmap Phase 1 DoD: "no endpoint is callable without a key; a client can poll a job to real completion; an oversized/malicious ingestion request is rejected before doing work" plus §20's "unauthenticated request rejected; path traversal in ingestion path rejected; SSRF URL rejected; oversized repo rejected" test categories) -- likely largely a consolidation/audit of coverage already built across 1.1-1.6 rather than wholly new behavior, but read §20/§37 item 1.7's exact text first rather than assuming that. **Do not begin Phase 1.7 without an explicit instruction to do so.**
+Phase 1.1 (`190d9bb`), Phase 1.2 (`a3a9b24`/`16fa747`), Phase 1.3 (`3feabf8`/`c9d27fa`), Phase 1.4 (`571cf3a`/`b80c776`), Phase 1.5 (`0a51697`), and Phase 1.6 (`1ff8ff2`) are committed and independently verified. Phase 1.7 is complete and verified but **not yet committed** (pending an explicit commit instruction, per this project's established pattern). **Phase 1 (1.1-1.7) is now fully implemented.** Next, per the roadmap's own sprint order (§37), begin Phase 2 — Search Engine at Scale (Tantivy-backed lexical index, embedded ANN vector index, RRF fusion path selectable via API, curated relevance dataset + eval harness, benchmark harness across repo-size tiers). **Do not begin Phase 2 without an explicit instruction to do so** -- read §37's exact Phase 2 item text (2.1-2.5) first rather than inferring from this summary.
 
 ## Context Handoff Notes
 
-Phase 1.6 implementation is complete and verified in this session:
+Phase 1.6 (`1ff8ff2`, already committed) and Phase 1.7 (this session, uncommitted) are both complete and verified.
 
-- **What was done**: audited §21's exact error-shape text and §37 item 1.6 first, noted there is no backlog (§45) row for this item (unlike every other Phase 1 milestone) so its DoD is the title + the §21 shape only; audited every existing `HTTPException` raise site and the rate-limit middleware's own ad-hoc 429 response; audited the whole test suite for assertions on the old `{"detail": ...}` shape (found exactly 2) and for any reliance on unhandled-exception-propagation through `TestClient` (found none) before implementing; then added a new `codepulse/api/errors.py` module (`error_json_response`, `status_code_to_error_code`, `install_error_handlers`) registering global `HTTPException`/`RequestValidationError`/`Exception` handlers once on `app`; updated the rate-limit middleware to use the same shared helper instead of its own ad-hoc dict; updated the 2 existing test assertions; added `tests/test_error_format.py` (11 tests) covering every distinct error class (401/403/404/409/429/501/400/422/500) plus a success-response regression guard.
-- **What was explicitly NOT done** (by design, matching 1.6's exact scope): no error status codes or message wording were changed; MCP's own distinct error shape was not implemented (MCP doesn't exist yet); no security test suite (Phase 1.7). `codepulse/indexer/engine.py`, `codepulse/storage/db.py`, `codepulse/auth.py`, `codepulse/jobs.py`, `codepulse/ingestion_safety.py`, and `codepulse/api/security.py` were **not** modified -- confirmed via `git diff --stat`; no new Alembic migration was needed or created.
-- **A real implementation subtlety was discovered and correctly resolved, not glossed over**: Starlette's `ExceptionMiddleware`/`ServerErrorMiddleware` sit inside a custom `@app.middleware("http")` function in the effective call stack, so an exception raised from inside the Phase 1.4 rate-limit middleware would never reach the new `@app.exception_handler(...)` registrations -- confirmed empirically (not just reasoned about) by attempting exactly that and observing the mismatch, before fixing it by having the middleware call the same shared helper function directly. Separately, confirmed empirically that a genuinely unhandled route-body exception IS correctly caught and reshaped by the new handler, but that Starlette's `TestClient` default (`raise_server_exceptions=True`) re-raises the original exception to the calling test regardless of whether the app already produced a clean response -- a testing-convenience feature, not a production bug -- requiring the one test that inspects a 500 body to explicitly pass `raise_server_exceptions=False`.
-- **What was verified**: 11 new focused tests passed; 2 existing test assertions updated and re-verified; full suite **215 passed, 1 skipped, 0 failed** (the skip is the same pre-existing, unrelated, environment-driven one from Phase 1.5); real `codepulse.db` confirmed unchanged (no test touches it; no migration exists to touch it with).
-- **Exact files changed this session (uncommitted at time of writing, on top of Phase 1.1-1.5's already-committed files)**:
-  - New: `codepulse/api/errors.py`, `tests/test_error_format.py`.
-  - Modified: `codepulse/api/app.py` (error-handler registration + rate-limit middleware's 429 reshaped via the shared helper + an unused `JSONResponse` import removed), `tests/test_ingestion_safety_endpoint.py` and `tests/test_rate_limit_middleware.py` (1 assertion each, updated to the new shape), this file.
-  - No other file touched.
-- **Exact tests run**: `.venv/Scripts/python.exe -m pytest -q` → 215 passed, 1 skipped, 0 failed, 13 warnings, ~202s.
-- **What remains**: **committing this work to git** (not yet done as of this document update — pending an explicit commit instruction). After that, the next roadmap step is Phase 1.7, which must **not** begin without an explicit instruction to do so.
+**Phase 1.7 — Security test suite:**
+
+- **What was done**: ran a dedicated, read-only specification-gate pass FIRST, per explicit instruction, before writing any test -- read §20/§21/§36/§37/§45's exact relevant text (quoted verbatim), confirmed there is no backlog row for this item (like 1.6), and produced a full requirement-by-requirement audit distinguishing explicit requirements from inference. That audit found three of §20's four security-test categories (traversal, SSRF, oversized-repo) already fully satisfied by Phase 1.5's existing tests, and one precise, real gap: 9 of the app's 13 endpoints lacked an endpoint-specific test proving a keyless request returns 401, against §36's own literal wording, "no endpoint is callable without a key." Implementation then added exactly those 9 tests to the existing `tests/test_api_authorization.py` (the topical module this behavior already belongs to), each asserting only `response.status_code == 401` on a syntactically valid, keyless request -- deliberately not re-asserting the Phase 1.6 error-envelope shape (that milestone already owns proving the shape itself).
+- **What was explicitly NOT done** (by design, matching 1.7's exact, narrowly-scoped instruction): no `tests/test_security.py` or other wrapper/consolidation file was created; no duplication of Phase 1.5's traversal/SSRF/oversized-repo tests; no re-verification of the Phase 1.6 error envelope; **zero production code was changed** -- authentication, authorization, ingestion safety, rate limiting, error formatting, CLI, MCP, configuration, and the database schema are all untouched, confirmed by `git diff --stat` showing exactly one file changed. This mirrors Phase 0.10's own established precedent for a "test suite"-titled milestone: pure validation, zero production changes.
+- **What was verified**: 9 new focused tests passed individually, then together with the existing Phase 1.5 ingestion-safety tests (61 passed, 1 pre-existing skip); full suite **224 passed, 1 skipped, 0 failed** -- exactly 215 + 9, matching the specification gate's own prediction to the test; real `codepulse.db` confirmed unchanged (revision `de22df2fc3ce`, all row counts identical) both before and after, since no test in this milestone touches it.
+- **Exact files changed this session (uncommitted at time of writing, on top of Phase 1.1-1.6's already-committed files)**:
+  - Modified: `tests/test_api_authorization.py` (9 new test functions + a short docstring addendum), this file.
+  - No other file touched -- confirmed via `git diff --stat` (1 file, +73/-0 lines).
+- **Exact tests run**: `.venv/Scripts/python.exe -m pytest -q` → 224 passed, 1 skipped, 0 failed, 13 warnings, ~180s.
+- **Two interpretation notes disclosed, not silently resolved** (see Known Issues for full text): whether §36's "job lifecycle tests" phrase names a new 1.7 obligation (read as no, already delivered under 1.3); whether "oversized repo rejected" covers the per-file-size skip behavior too (read as no, only the file-count reject maps to the word "rejected"). Neither was acted on beyond disclosure, per explicit instruction not to change Phase 1.5 behavior.
+- **What remains**: **committing this work to git** (not yet done as of this document update — pending an explicit commit instruction). Phase 1 (1.1-1.7) is then fully complete; the next roadmap step is Phase 2, which must **not** begin without an explicit instruction to do so.

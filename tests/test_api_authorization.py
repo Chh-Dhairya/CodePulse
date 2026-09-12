@@ -23,6 +23,18 @@ Definition of Done requires:
 
 All tests use the shared `isolated_app` fixture (tests/conftest.py): a
 temporary, disposable SQLite database, never the real codepulse.db.
+
+Phase 1.7 (roadmap §37 item 1.7, "Security test suite"; §20 Testing
+Strategy's "unauthenticated request rejected" category) added the final
+section below, closing the one remaining gap: nine endpoints that were
+already correctly rejecting a keyless request (via the same
+`Depends(require_api_key)` every route already carries) had no
+endpoint-specific test proving it. No production behavior changed --
+this only adds the missing proof. The other three §20 security-test
+categories (path traversal / SSRF / oversized-repo rejected) were already
+fully covered by Phase 1.5's `tests/test_ingestion_safety.py` and
+`tests/test_ingestion_safety_endpoint.py`, so Phase 1.7 does not duplicate
+them here.
 """
 from __future__ import annotations
 
@@ -323,4 +335,65 @@ def test_index_repository_rejected_without_any_key(client, isolated_app, tmp_pat
     empty_dir.mkdir()
 
     response = client.post("/v1/repositories/index", json={"url": str(empty_dir)})
+    assert response.status_code == 401
+
+
+# --- Phase 1.7 / roadmap §20, §36: "unauthenticated request rejected" --------
+# closes the remaining endpoint-level gap -- every endpoint above this
+# section already had at least one no-key test tied to its own scope/
+# success coverage; these nine did not yet have one tied specifically to
+# the no-key case, even though `Depends(require_api_key)` is already wired
+# into every route (Phase 1.2) and already exhaustively unit-tested on its
+# own (the "Missing / unknown / revoked key" section at the top of this
+# file). This section proves it holds for every remaining route too --
+# not a new behavior, a missing endpoint-level proof of an existing one.
+# Requests use syntactically valid bodies (what a real, correctly-shaped
+# call would send) so the 401 is unambiguously attributable to the missing
+# key alone, not to some other validation failure.
+
+def test_search_rejected_without_any_key(client, isolated_app):
+    response = client.post("/v1/search", json={"query": "hello"})
+    assert response.status_code == 401
+
+
+def test_symbol_details_rejected_without_any_key(client, isolated_app):
+    response = client.get("/v1/symbols/1")
+    assert response.status_code == 401
+
+
+def test_symbol_similar_rejected_without_any_key(client, isolated_app):
+    response = client.post("/v1/symbols/1/similar", json={})
+    assert response.status_code == 401
+
+
+def test_symbol_impact_analysis_rejected_without_any_key(client, isolated_app):
+    response = client.post("/v1/symbols/1/impact-analysis", json={})
+    assert response.status_code == 401
+
+
+def test_symbol_within_search_rejected_without_any_key(client, isolated_app):
+    response = client.post("/v1/symbols/1/search?query=hello")
+    assert response.status_code == 401
+
+
+def test_file_symbols_rejected_without_any_key(client, isolated_app):
+    response = client.get("/v1/files/1/symbols")
+    assert response.status_code == 401
+
+
+def test_repository_stats_rejected_without_any_key(client, isolated_app):
+    response = client.get("/v1/repositories/1/stats")
+    assert response.status_code == 401
+
+
+def test_ide_search_rejected_without_any_key(client, isolated_app):
+    response = client.post("/v1/ide-search", json={"selected_text": "hello"})
+    assert response.status_code == 401
+
+
+def test_feedback_rejected_without_any_key(client, isolated_app):
+    response = client.post(
+        "/v1/search/feedback",
+        json={"search_id": "s1", "result_id": 1, "feedback": "relevant"},
+    )
     assert response.status_code == 401
