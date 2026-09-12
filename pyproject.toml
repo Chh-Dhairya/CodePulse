@@ -18,10 +18,10 @@ dependencies = [
     "sqlalchemy>=2.0.30,<2.1.0",
     "alembic>=1.13.1,<1.14.0",
 
-    # Embedded Keyword Search -- not yet wired in (that's Phase 2's
-    # Tantivy-backed lexical index), but deliberately kept per the roadmap's
-    # explicit Phase 0.9 dependency trim decision ("keep tantivy, finally use
-    # it") rather than removed now and re-added later.
+    # Embedded Keyword Search -- wired in as of Phase 2.1 (the Tantivy-backed
+    # `BM25Index` lexical index adapter, codepulse/search/bm25.py). Kept
+    # since the Phase 0.9 dependency trim's explicit decision ("keep
+    # tantivy, finally use it").
     "tantivy>=0.22.0,<0.23.0",
 
     # Code Parsing & AST (Bundled, zero-compile)

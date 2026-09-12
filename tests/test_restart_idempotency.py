@@ -166,6 +166,21 @@ def test_repeated_reindex_is_idempotent_and_identifiers_stay_stable(tmp_path, sh
         finally:
             session.close()
 
+        # Phase 2.1: the Tantivy-backed BM25Index has no backing SQL table
+        # (see test 2 below -- lexical state is intentionally not durable),
+        # so its own idempotency must be checked directly against the
+        # engine's live in-memory state, not via a session query like the
+        # SQL-backed assertions above. Before Phase 2.1, `BM25Index` had no
+        # doc_id-based replace logic at all, so this exact 5-iteration loop
+        # would have silently accumulated 5x duplicate lexical documents
+        # without any test ever catching it -- asserted explicitly here so
+        # that regression can never again go unnoticed.
+        assert engine.bm25_index.num_docs == 3, (
+            f"iteration {iteration}: repeated re-indexing must not accumulate duplicate "
+            f"lexical (Tantivy) documents -- expected exactly 3 (one per symbol), "
+            f"got {engine.bm25_index.num_docs}"
+        )
+
 
 # --- 2. Restart restores durable (semantic) state, not in-memory-only state -
 

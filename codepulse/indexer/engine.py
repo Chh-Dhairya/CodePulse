@@ -347,11 +347,26 @@ class IndexingEngine:
 
                 self.vector_index.add_batch(doc_ids, embeddings, metadatas)
 
-        # 5. Populate BM25 Index
+        # 5. Populate BM25 (Tantivy-backed, Phase 2.1) Index
         # Phase 0.6: doc_id is repo-qualified (same collision reasoning as
         # the vector index above) and repo_id is threaded into the BM25
         # metadata and symbol_repo_map so repository-scoped search can
         # filter candidates without a second identity system.
+        #
+        # Phase 2.1: `remove_repo` deletes every lexical document this
+        # engine has previously indexed for THIS repository before the
+        # fresh add pass below -- required so that re-indexing an
+        # already-indexed repository (a real, supported flow: a new
+        # IndexJob can be created once the previous one is no longer
+        # active, Phase 1.3) replaces rather than accumulates its lexical
+        # documents. Safe to call on a never-before-indexed (or empty)
+        # repository -- a no-op in that case (see BM25Index.remove_repo's
+        # own docstring). This was a real, pre-existing, untested gap in
+        # the pre-Phase-2.1 in-memory BM25Index (no doc_id-based replace
+        # logic existed there at all); fixed here because Tantivy's
+        # delete-by-term makes it essentially free, with zero impact on
+        # the ranking contract.
+        self.bm25_index.remove_repo(repo_id)
         for sym in all_symbols:
             doc_id = f"{repo_id}::{sym.file_path}::{sym.name}"
             self.symbols_by_id[doc_id] = sym
