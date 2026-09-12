@@ -24,6 +24,18 @@ dependencies = [
     # tantivy, finally use it").
     "tantivy>=0.22.0,<0.23.0",
 
+    # Embedded Vector Search -- new in Phase 2.2 (the sqlite-vec-backed
+    # `VectorIndex` semantic index adapter, codepulse/search/vector.py).
+    # Roadmap §7 names two candidate local vector-index libraries,
+    # `sqlite-vec` or `hnswlib`, without choosing between them; `hnswlib`
+    # has no prebuilt wheel for this project's actual Windows/CPython 3.11
+    # development platform (source-only on PyPI, requires an MSVC C++
+    # compiler not installed here), so `sqlite-vec` -- which does have a
+    # prebuilt win_amd64 wheel -- was used instead (disclosed in full in
+    # codepulse/search/vector.py's module docstring and
+    # CODEPULSE_PROGRESS.md's Phase 2.2 section).
+    "sqlite-vec>=0.1.9,<0.2.0",
+
     # Code Parsing & AST (Bundled, zero-compile)
     "tree-sitter>=0.21.0,<0.22.0",
     "tree-sitter-languages>=1.10.2",
