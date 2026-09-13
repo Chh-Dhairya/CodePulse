@@ -1,0 +1,858 @@
+{
+  "description": "Phase 2.4 relevance-evaluation dataset (roadmap section 20 Testing Strategy: \"curate ~100-300 (query, expected-symbol) pairs from CodePulse's own repository as a starting relevance dataset; track Recall@10, MRR as a regression gate on ranking changes\"). Every (query, expected_file_path, expected_symbol_name) triple references a real symbol that genuinely exists in codepulse/ as of this dataset's curation -- verified programmatically against the actual parsed symbol table before being included, not invented.",
+  "source_repository": "CodePulse's own codepulse/ package (this repository)",
+  "expected_file_path_convention": "relative to the codepulse/ package directory, e.g. \"auth.py\", \"search/bm25.py\"",
+  "pair_sources": {
+    "docstring": "query derived deterministically from the symbol's own real docstring (first usable sentence)",
+    "hand_curated": "query hand-written as a natural paraphrase, deliberately NOT reusing the docstring's own wording, to test genuine retrieval rather than docstring-text overlap"
+  },
+  "count": 141,
+  "pairs": [
+    {
+      "query": "Result of create_api_key.",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "CreatedAPIKey",
+      "source": "docstring"
+    },
+    {
+      "query": "Generates a new, cryptographically random API key string.",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "generate_raw_api_key",
+      "source": "docstring"
+    },
+    {
+      "query": "Hashes a raw API key for storage/lookup.",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "hash_api_key",
+      "source": "docstring"
+    },
+    {
+      "query": "Creates a new API key: generates a random raw key, persists only its hash (+ a short non-secret prefix) and optional repository scoping, and returns the raw key to the caller exactly once.",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "create_api_key",
+      "source": "docstring"
+    },
+    {
+      "query": "Looks up the id of the APIKeyModel row matching raw_key, if any and only if it has not been revoked.",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "verify_api_key",
+      "source": "docstring"
+    },
+    {
+      "query": "Parses a single file and displays extracted AST symbols and complexity.",
+      "expected_file_path": "cli.py",
+      "expected_symbol_name": "cmd_parse",
+      "source": "docstring"
+    },
+    {
+      "query": "Indexes a repository and opens an interactive search prompt or executes a search.",
+      "expected_file_path": "cli.py",
+      "expected_symbol_name": "cmd_index_and_search",
+      "source": "docstring"
+    },
+    {
+      "query": "Performs upstream and downstream blast-radius impact analysis on a symbol.",
+      "expected_file_path": "cli.py",
+      "expected_symbol_name": "cmd_impact",
+      "source": "docstring"
+    },
+    {
+      "query": "Central configuration model for CodePulse.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "CodePulseConfig",
+      "source": "docstring"
+    },
+    {
+      "query": "This guards the setting itself, not just its default, so a future config/env override can't reintroduce it unnoticed.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "_validate_cors_policy",
+      "source": "docstring"
+    },
+    {
+      "query": "Normalizes a parsed TOML dictionary into CodePulseConfig field keys.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "_normalize_toml_dict",
+      "source": "docstring"
+    },
+    {
+      "query": "Coerces a string environment variable value into its target field type.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "_coerce_env_val",
+      "source": "docstring"
+    },
+    {
+      "query": "Extracts all matching CODEPULSE_* environment variables.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "_load_env_overrides",
+      "source": "docstring"
+    },
+    {
+      "query": "Loads CodePulse configuration following the strict precedence rule: CLI flags > Environment variables > codepulse.toml > Built-in defaults",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "load_config",
+      "source": "docstring"
+    },
+    {
+      "query": "Returns the active CodePulse configuration singleton.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "get_settings",
+      "source": "docstring"
+    },
+    {
+      "query": "Explicitly sets the global configuration instance (primarily for testing).",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "set_settings",
+      "source": "docstring"
+    },
+    {
+      "query": "Resets the global configuration instance to uninitialized state.",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "reset_settings",
+      "source": "docstring"
+    },
+    {
+      "query": "Resolves path (following symlinks, collapsing ..) and, if allowed_roots is non-empty, rejects it unless the resolved path is contained in (or equal to) one of them.",
+      "expected_file_path": "ingestion_safety.py",
+      "expected_symbol_name": "validate_local_path",
+      "source": "docstring"
+    },
+    {
+      "query": "Validates a git URL's scheme and resolved host for SSRF safety.",
+      "expected_file_path": "ingestion_safety.py",
+      "expected_symbol_name": "validate_git_url",
+      "source": "docstring"
+    },
+    {
+      "query": "Creates a new IndexJob row in the initial queued state.",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "create_job",
+      "source": "docstring"
+    },
+    {
+      "query": "Transitions a job queued -> running, recording started_at.",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "mark_running",
+      "source": "docstring"
+    },
+    {
+      "query": "Transitions a job running -> failed, recording finished_at and error.",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "mark_failed",
+      "source": "docstring"
+    },
+    {
+      "query": "Returns the current state of one job, or None if no such job exists.",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "get_job",
+      "source": "docstring"
+    },
+    {
+      "query": "Represents an extracted code symbol (function, method, class, etc.).",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "Symbol",
+      "source": "docstring"
+    },
+    {
+      "query": "An imported item with an optional alias (e.g., from math import sqrt as s).",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "ImportItem",
+      "source": "docstring"
+    },
+    {
+      "query": "Represents an import in source code.",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "ImportStatement",
+      "source": "docstring"
+    },
+    {
+      "query": "A reference where a symbol/function is invoked.",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "CallReference",
+      "source": "docstring"
+    },
+    {
+      "query": "A resolved or partially resolved call graph edge between two symbols.",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "CallGraphEdge",
+      "source": "docstring"
+    },
+    {
+      "query": "Complete AST parse result for a single file.",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "FileParseResult",
+      "source": "docstring"
+    },
+    {
+      "query": "Computes a deterministic SHA-256 hex digest for whole-file content.",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "compute_content_hash",
+      "source": "docstring"
+    },
+    {
+      "query": "A plain in-memory token-bucket rate limiter, one bucket per identity string.",
+      "expected_file_path": "rate_limit.py",
+      "expected_symbol_name": "TokenBucketLimiter",
+      "source": "docstring"
+    },
+    {
+      "query": "Attempts to consume one token for identity.",
+      "expected_file_path": "rate_limit.py",
+      "expected_symbol_name": "check",
+      "source": "docstring"
+    },
+    {
+      "query": "Clears all bucket state -- primarily for test isolation.",
+      "expected_file_path": "rate_limit.py",
+      "expected_symbol_name": "reset",
+      "source": "docstring"
+    },
+    {
+      "query": "Resets the module-level default limiter -- primarily for test isolation.",
+      "expected_file_path": "rate_limit.py",
+      "expected_symbol_name": "reset_limiter",
+      "source": "docstring"
+    },
+    {
+      "query": "Parses a job id from either the job_<id> string form or a bare integer.",
+      "expected_file_path": "api/app.py",
+      "expected_symbol_name": "_parse_job_id",
+      "source": "docstring"
+    },
+    {
+      "query": "result is populated only once status == \"succeeded\", from the real, measured return value of IndexingEngine.index_directory() -- never fabricated/estimated.",
+      "expected_file_path": "api/app.py",
+      "expected_symbol_name": "get_job_status",
+      "source": "docstring"
+    },
+    {
+      "query": "Falls back to the generic \"error\" for a status code HTTPStatus itself doesn't recognize.",
+      "expected_file_path": "api/errors.py",
+      "expected_symbol_name": "status_code_to_error_code",
+      "source": "docstring"
+    },
+    {
+      "query": "Builds the structured error envelope as a JSON response.",
+      "expected_file_path": "api/errors.py",
+      "expected_symbol_name": "error_json_response",
+      "source": "docstring"
+    },
+    {
+      "query": "Registers the structured-error-response handlers on app.",
+      "expected_file_path": "api/errors.py",
+      "expected_symbol_name": "install_error_handlers",
+      "source": "docstring"
+    },
+    {
+      "query": "Authorization context for one authenticated request.",
+      "expected_file_path": "api/security.py",
+      "expected_symbol_name": "AuthorizedKey",
+      "source": "docstring"
+    },
+    {
+      "query": "Raises HTTP 403 unless this key is scoped to repository_id.",
+      "expected_file_path": "api/security.py",
+      "expected_symbol_name": "authorize_repository",
+      "source": "docstring"
+    },
+    {
+      "query": "Authorizes a search-style request whose repository_id may legitimately be omitted (None), meaning \"search across every repository\" -- an existing feature of IndexingEngine.search (Phase 0.6).",
+      "expected_file_path": "api/security.py",
+      "expected_symbol_name": "authorize_search_scope",
+      "source": "docstring"
+    },
+    {
+      "query": "FastAPI dependency: verifies the X-API-Key request header and returns the caller's AuthorizedKey context, or raises HTTP 401.",
+      "expected_file_path": "api/security.py",
+      "expected_symbol_name": "require_api_key",
+      "source": "docstring"
+    },
+    {
+      "query": "Represents a chunk of code prepared for embedding.",
+      "expected_file_path": "embeddings/chunker.py",
+      "expected_symbol_name": "CodeChunk",
+      "source": "docstring"
+    },
+    {
+      "query": "AST-aware semantic chunker for code symbols.",
+      "expected_file_path": "embeddings/chunker.py",
+      "expected_symbol_name": "SemanticChunker",
+      "source": "docstring"
+    },
+    {
+      "query": "Creates semantic chunks for an extracted code Symbol.",
+      "expected_file_path": "embeddings/chunker.py",
+      "expected_symbol_name": "chunk_symbol",
+      "source": "docstring"
+    },
+    {
+      "query": "Raised when the configured embedding model cannot be loaded or cannot produce a real embedding.",
+      "expected_file_path": "embeddings/embedder.py",
+      "expected_symbol_name": "EmbeddingUnavailableError",
+      "source": "docstring"
+    },
+    {
+      "query": "Generates dense vector embeddings for code snippets and natural language queries.",
+      "expected_file_path": "embeddings/embedder.py",
+      "expected_symbol_name": "CodeEmbedder",
+      "source": "docstring"
+    },
+    {
+      "query": "Encodes a single string or list of strings into normalized embedding vectors.",
+      "expected_file_path": "embeddings/embedder.py",
+      "expected_symbol_name": "encode",
+      "source": "docstring"
+    },
+    {
+      "query": "Computes cosine similarity between two normalized vectors.",
+      "expected_file_path": "embeddings/embedder.py",
+      "expected_symbol_name": "cosine_similarity",
+      "source": "docstring"
+    },
+    {
+      "query": "Orchestrates repository indexing, AST parsing, call graph construction, embedding generation, BM25 indexing, and database storage.",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "IndexingEngine",
+      "source": "docstring"
+    },
+    {
+      "query": "Indexes all parseable files within a repository directory.",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "index_directory",
+      "source": "docstring"
+    },
+    {
+      "query": "Persists repository hierarchy to the database.",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "_persist_to_db",
+      "source": "docstring"
+    },
+    {
+      "query": "Restores the in-memory vector_index for ONE repository from durably persisted code_embeddings rows, without re-parsing or re-embedding anything.",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "hydrate_repository",
+      "source": "docstring"
+    },
+    {
+      "query": "Called automatically once from __init__ so a freshly constructed engine (e.g. a new server process) has semantic search available immediately from durable storage, without re-indexing.",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "hydrate_all",
+      "source": "docstring"
+    },
+    {
+      "query": "Executes search across the indexed repository/repositories.",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "search",
+      "source": "docstring"
+    },
+    {
+      "query": "Loads one root-level ignore file into a PathSpec using gitwildmatch syntax.",
+      "expected_file_path": "indexer/ignore.py",
+      "expected_symbol_name": "_load_spec",
+      "source": "docstring"
+    },
+    {
+      "query": "Combined .gitignore + .codepulseignore rules for one repository root.",
+      "expected_file_path": "indexer/ignore.py",
+      "expected_symbol_name": "RepositoryIgnoreRules",
+      "source": "docstring"
+    },
+    {
+      "query": "rel_path must be repository-root-relative, using forward slashes (the same path representation the rest of the indexing pipeline uses for FileParseResult/Symbol/DB rows).",
+      "expected_file_path": "indexer/ignore.py",
+      "expected_symbol_name": "is_ignored",
+      "source": "docstring"
+    },
+    {
+      "query": "Abstract Base Class for language-specific AST parsers.",
+      "expected_file_path": "parser/base.py",
+      "expected_symbol_name": "LanguageParser",
+      "source": "docstring"
+    },
+    {
+      "query": "Returns the canonical language identifier (e.g. 'python', 'javascript').",
+      "expected_file_path": "parser/base.py",
+      "expected_symbol_name": "language",
+      "source": "docstring"
+    },
+    {
+      "query": "Extract functions, classes, methods, and types with their signatures and docstrings.",
+      "expected_file_path": "parser/base.py",
+      "expected_symbol_name": "extract_symbols",
+      "source": "docstring"
+    },
+    {
+      "query": "Extract module imports and imported identifiers.",
+      "expected_file_path": "parser/base.py",
+      "expected_symbol_name": "extract_imports",
+      "source": "docstring"
+    },
+    {
+      "query": "Extract function/method invocations mapped to their enclosing caller symbols.",
+      "expected_file_path": "parser/base.py",
+      "expected_symbol_name": "extract_calls",
+      "source": "docstring"
+    },
+    {
+      "query": "Parse source code completely and return aggregated FileParseResult.",
+      "expected_file_path": "parser/base.py",
+      "expected_symbol_name": "parse_file",
+      "source": "docstring"
+    },
+    {
+      "query": "Retrieve a cached parser instance for the requested language.",
+      "expected_file_path": "parser/factory.py",
+      "expected_symbol_name": "get_parser_for_language",
+      "source": "docstring"
+    },
+    {
+      "query": "Determine the appropriate parser based on file extension.",
+      "expected_file_path": "parser/factory.py",
+      "expected_symbol_name": "get_parser_for_file",
+      "source": "docstring"
+    },
+    {
+      "query": "Resolves import statements to target repository file paths (Phase 2A).",
+      "expected_file_path": "parser/graph.py",
+      "expected_symbol_name": "ImportResolver",
+      "source": "docstring"
+    },
+    {
+      "query": "Resolves an ImportStatement in current_file to a target file path in the repo.",
+      "expected_file_path": "parser/graph.py",
+      "expected_symbol_name": "resolve_import_path",
+      "source": "docstring"
+    },
+    {
+      "query": "Builds and queries the symbol call graph (Phase 2B - Acyclic & Cycle-Safe).",
+      "expected_file_path": "parser/graph.py",
+      "expected_symbol_name": "CallGraphBuilder",
+      "source": "docstring"
+    },
+    {
+      "query": "Returns symbols called by the given symbol up to max_depth (downstream impact).",
+      "expected_file_path": "parser/graph.py",
+      "expected_symbol_name": "get_callees",
+      "source": "docstring"
+    },
+    {
+      "query": "Returns symbols that call the given symbol up to max_depth (upstream blast radius).",
+      "expected_file_path": "parser/graph.py",
+      "expected_symbol_name": "get_callers",
+      "source": "docstring"
+    },
+    {
+      "query": "AST parser for JavaScript and TypeScript source code using Tree-sitter.",
+      "expected_file_path": "parser/javascript.py",
+      "expected_symbol_name": "JavaScriptParser",
+      "source": "docstring"
+    },
+    {
+      "query": "AST parser for Python source code using Tree-sitter.",
+      "expected_file_path": "parser/python.py",
+      "expected_symbol_name": "PythonParser",
+      "source": "docstring"
+    },
+    {
+      "query": "Defines the Tantivy schema fields used to build the lexical index.",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "_build_schema",
+      "source": "docstring"
+    },
+    {
+      "query": "Embedded Tantivy-backed lexical index for codebase symbols (Phase 2.1).",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "BM25Index",
+      "source": "docstring"
+    },
+    {
+      "query": "Adds a Symbol to the lexical index.",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "add_symbol",
+      "source": "docstring"
+    },
+    {
+      "query": "Indexes a single document text with its ID and optional metadata.",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "add_document",
+      "source": "docstring"
+    },
+    {
+      "query": "Deletes every currently-indexed lexical document belonging to repo_id (Phase 2.1 repository-replacement semantics -- see class docstring and IndexingEngine.index_directory()'s call site).",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "remove_repo",
+      "source": "docstring"
+    },
+    {
+      "query": "Searches the index with the given query.",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "search",
+      "source": "docstring"
+    },
+    {
+      "query": "A scored result item returned from the hybrid search engine.",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "SearchResultItem",
+      "source": "docstring"
+    },
+    {
+      "query": "Merges and ranks candidate results from BM25, Dense Vector Search, and the Call Graph.",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "HybridRanker",
+      "source": "docstring"
+    },
+    {
+      "query": "Reconstructs a SearchResultItem from a candidate's metadata dictionary.",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "_build_result_item",
+      "source": "docstring"
+    },
+    {
+      "query": "Fuses BM25 and Vector search results using weighted linear combination.",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "fuse",
+      "source": "docstring"
+    },
+    {
+      "query": "Reciprocal Rank Fusion (RRF) combiner.",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "fuse_rrf",
+      "source": "docstring"
+    },
+    {
+      "query": "Splits a programming identifier into its constituent words.",
+      "expected_file_path": "search/tokenizer.py",
+      "expected_symbol_name": "split_identifier",
+      "source": "docstring"
+    },
+    {
+      "query": "Code-aware tokenizer for BM25 and lexical search.",
+      "expected_file_path": "search/tokenizer.py",
+      "expected_symbol_name": "tokenize_code",
+      "source": "docstring"
+    },
+    {
+      "query": "Embedded vector similarity index for dense code embeddings (Phase 2.2).",
+      "expected_file_path": "search/vector.py",
+      "expected_symbol_name": "VectorIndex",
+      "source": "docstring"
+    },
+    {
+      "query": "Adds a single normalized vector with doc_id and metadata.",
+      "expected_file_path": "search/vector.py",
+      "expected_symbol_name": "add",
+      "source": "docstring"
+    },
+    {
+      "query": "Adds a batch of vectors to the index.",
+      "expected_file_path": "search/vector.py",
+      "expected_symbol_name": "add_batch",
+      "source": "docstring"
+    },
+    {
+      "query": "Calculates cosine similarities between query_vector and all indexed vectors.",
+      "expected_file_path": "search/vector.py",
+      "expected_symbol_name": "search",
+      "source": "docstring"
+    },
+    {
+      "query": "This is Phase 1.1 scope only: the model, hashing, and a creation (+ verification-primitive) flow.",
+      "expected_file_path": "storage/db.py",
+      "expected_symbol_name": "APIKeyModel",
+      "source": "docstring"
+    },
+    {
+      "query": "One row per (api_key, repository) pair a key is permitted to access.",
+      "expected_file_path": "storage/db.py",
+      "expected_symbol_name": "APIKeyRepositoryModel",
+      "source": "docstring"
+    },
+    {
+      "query": "Tracks one indexing run for a repository through its state machine.",
+      "expected_file_path": "storage/db.py",
+      "expected_symbol_name": "IndexJobModel",
+      "source": "docstring"
+    },
+    {
+      "query": "Manages database connection, tables, and session lifecycle.",
+      "expected_file_path": "storage/db.py",
+      "expected_symbol_name": "StorageManager",
+      "source": "docstring"
+    },
+    {
+      "query": "Constructs and returns an Alembic Config object configured with the project's alembic.ini and target database URL.",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "get_alembic_config",
+      "source": "docstring"
+    },
+    {
+      "query": "Applies Alembic migrations up to the specified revision (default: head).",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "run_migrations",
+      "source": "docstring"
+    },
+    {
+      "query": "Stamps the database at the specified revision without running migration scripts.",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "stamp_database",
+      "source": "docstring"
+    },
+    {
+      "query": "Downgrades Alembic migrations to the specified revision (default: base).",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "downgrade_migrations",
+      "source": "docstring"
+    },
+    {
+      "query": "Inspects the database and returns the current alembic_version revision string, or None if not stamped.",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "get_current_revision",
+      "source": "docstring"
+    },
+    {
+      "query": "How do I create a new API key?",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "create_api_key",
+      "source": "hand_curated"
+    },
+    {
+      "query": "verify an API key against the database",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "verify_api_key",
+      "source": "hand_curated"
+    },
+    {
+      "query": "hash an API key before storing it",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "hash_api_key",
+      "source": "hand_curated"
+    },
+    {
+      "query": "generate a random secret token for authentication",
+      "expected_file_path": "auth.py",
+      "expected_symbol_name": "generate_raw_api_key",
+      "source": "hand_curated"
+    },
+    {
+      "query": "check whether a repository is currently being indexed",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "get_active_job",
+      "source": "hand_curated"
+    },
+    {
+      "query": "mark an indexing job as succeeded",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "mark_succeeded",
+      "source": "hand_curated"
+    },
+    {
+      "query": "start a background indexing job",
+      "expected_file_path": "jobs.py",
+      "expected_symbol_name": "create_job",
+      "source": "hand_curated"
+    },
+    {
+      "query": "token bucket rate limiting implementation",
+      "expected_file_path": "rate_limit.py",
+      "expected_symbol_name": "TokenBucketLimiter",
+      "source": "hand_curated"
+    },
+    {
+      "query": "is this request over the rate limit",
+      "expected_file_path": "rate_limit.py",
+      "expected_symbol_name": "check",
+      "source": "hand_curated"
+    },
+    {
+      "query": "prevent path traversal in local repository ingestion",
+      "expected_file_path": "ingestion_safety.py",
+      "expected_symbol_name": "validate_local_path",
+      "source": "hand_curated"
+    },
+    {
+      "query": "block SSRF attacks on git clone URLs",
+      "expected_file_path": "ingestion_safety.py",
+      "expected_symbol_name": "validate_git_url",
+      "source": "hand_curated"
+    },
+    {
+      "query": "central authentication dependency for FastAPI routes",
+      "expected_file_path": "api/security.py",
+      "expected_symbol_name": "require_api_key",
+      "source": "hand_curated"
+    },
+    {
+      "query": "check if an API key can access a given repository",
+      "expected_file_path": "api/security.py",
+      "expected_symbol_name": "authorize_repository",
+      "source": "hand_curated"
+    },
+    {
+      "query": "convert an HTTP status code into an error code string",
+      "expected_file_path": "api/errors.py",
+      "expected_symbol_name": "status_code_to_error_code",
+      "source": "hand_curated"
+    },
+    {
+      "query": "register global exception handlers on the FastAPI app",
+      "expected_file_path": "api/errors.py",
+      "expected_symbol_name": "install_error_handlers",
+      "source": "hand_curated"
+    },
+    {
+      "query": "load configuration from environment variables and TOML",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "load_config",
+      "source": "hand_curated"
+    },
+    {
+      "query": "get the current application settings singleton",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "get_settings",
+      "source": "hand_curated"
+    },
+    {
+      "query": "walk a directory and parse every source file into symbols",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "index_directory",
+      "source": "hand_curated"
+    },
+    {
+      "query": "restore the vector index from the database after a restart",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "hydrate_repository",
+      "source": "hand_curated"
+    },
+    {
+      "query": "run a hybrid, keyword, semantic, or RRF search query",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "search",
+      "source": "hand_curated"
+    },
+    {
+      "query": "orchestrates the whole repository indexing pipeline",
+      "expected_file_path": "indexer/engine.py",
+      "expected_symbol_name": "IndexingEngine",
+      "source": "hand_curated"
+    },
+    {
+      "query": "respect .gitignore and .codepulseignore when discovering files",
+      "expected_file_path": "indexer/ignore.py",
+      "expected_symbol_name": "RepositoryIgnoreRules",
+      "source": "hand_curated"
+    },
+    {
+      "query": "Tantivy-backed embedded lexical search index",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "BM25Index",
+      "source": "hand_curated"
+    },
+    {
+      "query": "add a parsed code symbol to the keyword search index",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "add_symbol",
+      "source": "hand_curated"
+    },
+    {
+      "query": "delete all lexical documents belonging to one repository",
+      "expected_file_path": "search/bm25.py",
+      "expected_symbol_name": "remove_repo",
+      "source": "hand_curated"
+    },
+    {
+      "query": "sqlite-vec backed embedded vector similarity index",
+      "expected_file_path": "search/vector.py",
+      "expected_symbol_name": "VectorIndex",
+      "source": "hand_curated"
+    },
+    {
+      "query": "insert many embedding vectors into the vector index at once",
+      "expected_file_path": "search/vector.py",
+      "expected_symbol_name": "add_batch",
+      "source": "hand_curated"
+    },
+    {
+      "query": "combine keyword and semantic search scores into one ranking",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "fuse",
+      "source": "hand_curated"
+    },
+    {
+      "query": "reciprocal rank fusion of two ranked result lists",
+      "expected_file_path": "search/ranker.py",
+      "expected_symbol_name": "fuse_rrf",
+      "source": "hand_curated"
+    },
+    {
+      "query": "split a camelCase or snake_case identifier into words",
+      "expected_file_path": "search/tokenizer.py",
+      "expected_symbol_name": "split_identifier",
+      "source": "hand_curated"
+    },
+    {
+      "query": "tokenizer used for BM25 lexical indexing",
+      "expected_file_path": "search/tokenizer.py",
+      "expected_symbol_name": "tokenize_code",
+      "source": "hand_curated"
+    },
+    {
+      "query": "generate a dense embedding vector for a code snippet",
+      "expected_file_path": "embeddings/embedder.py",
+      "expected_symbol_name": "encode",
+      "source": "hand_curated"
+    },
+    {
+      "query": "break a function's source into chunks for embedding",
+      "expected_file_path": "embeddings/chunker.py",
+      "expected_symbol_name": "chunk_symbol",
+      "source": "hand_curated"
+    },
+    {
+      "query": "Tree-sitter based AST parser for Python source files",
+      "expected_file_path": "parser/python.py",
+      "expected_symbol_name": "PythonParser",
+      "source": "hand_curated"
+    },
+    {
+      "query": "find which functions call a given symbol (impact analysis)",
+      "expected_file_path": "parser/graph.py",
+      "expected_symbol_name": "get_callers",
+      "source": "hand_curated"
+    },
+    {
+      "query": "pick the right language parser based on file extension",
+      "expected_file_path": "parser/factory.py",
+      "expected_symbol_name": "get_parser_for_file",
+      "source": "hand_curated"
+    },
+    {
+      "query": "compute a content hash to detect unchanged files",
+      "expected_file_path": "models.py",
+      "expected_symbol_name": "compute_content_hash",
+      "source": "hand_curated"
+    },
+    {
+      "query": "SQLAlchemy database session and connection manager",
+      "expected_file_path": "storage/db.py",
+      "expected_symbol_name": "StorageManager",
+      "source": "hand_curated"
+    },
+    {
+      "query": "apply pending Alembic database migrations",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "run_migrations",
+      "source": "hand_curated"
+    },
+    {
+      "query": "mark a database as already matching a migration without running it",
+      "expected_file_path": "storage/migrations.py",
+      "expected_symbol_name": "stamp_database",
+      "source": "hand_curated"
+    },
+    {
+      "query": "command-line entry point for the codepulse CLI",
+      "expected_file_path": "cli.py",
+      "expected_symbol_name": "main",
+      "source": "hand_curated"
+    }
+  ]
+}
