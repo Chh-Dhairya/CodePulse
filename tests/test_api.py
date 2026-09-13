@@ -42,6 +42,60 @@ def test_api_search_endpoint(isolated_app):
     assert data["query"] == "test query"
 
 
+def test_api_search_endpoint_accepts_rrf_search_type(isolated_app):
+    """Phase 2.3 (roadmap §37 item 2.3): "rrf" is now a valid `search_type`
+    -- mirrors test_api_search_endpoint exactly, only the search_type value
+    differs, proving the wiring works end-to-end through the real HTTP
+    surface, not just at the IndexingEngine/HybridRanker layer."""
+    session = isolated_app.get_session()
+    try:
+        repo = RepositoryModel(name="r1", url="file:///r1")
+        session.add(repo)
+        session.commit()
+        repo_id = repo.id
+    finally:
+        session.close()
+
+    client = TestClient(app)
+    headers = make_api_key_headers(isolated_app, repository_ids=[repo_id])
+
+    response = client.post(
+        "/v1/search",
+        json={"query": "test query", "limit": 5, "search_type": "rrf", "repository_id": repo_id},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "results" in data
+    assert "execution_time_ms" in data
+    assert data["query"] == "test query"
+    assert data["search_type"] == "rrf"
+
+
+def test_api_search_endpoint_still_rejects_an_unknown_search_type(isolated_app):
+    """Regression guard: widening the pattern to accept "rrf" must not
+    accidentally make it accept arbitrary values -- FastAPI's own
+    RequestValidationError (422) still fires for anything else."""
+    session = isolated_app.get_session()
+    try:
+        repo = RepositoryModel(name="r1", url="file:///r1")
+        session.add(repo)
+        session.commit()
+        repo_id = repo.id
+    finally:
+        session.close()
+
+    client = TestClient(app)
+    headers = make_api_key_headers(isolated_app, repository_ids=[repo_id])
+
+    response = client.post(
+        "/v1/search",
+        json={"query": "test query", "search_type": "not_a_real_type", "repository_id": repo_id},
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+
 def test_api_autocomplete_endpoint(isolated_app):
     client = TestClient(app)
     headers = make_api_key_headers(isolated_app)  # autocomplete needs auth only, no repo scope

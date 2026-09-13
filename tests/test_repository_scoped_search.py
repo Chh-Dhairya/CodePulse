@@ -264,3 +264,90 @@ def test_scoped_search_is_deterministic_across_repeated_calls(two_repo_engine):
 
     assert [r.doc_id for r in run1] == [r.doc_id for r in run2]
     assert [r.final_score for r in run1] == [r.final_score for r in run2]
+
+
+# --- Phase 2.3 -- RRF search respects repository scope (roadmap §36/§37 ----
+# --- item 2.3: "wire the already-implemented RRF fusion path to be ---------
+# --- selectable via the API") -----------------------------------------------
+
+def test_rrf_search_scoped_returns_only_that_repo(two_repo_engine):
+    engine, repo_a_id, repo_b_id = two_repo_engine
+
+    results_a = engine.search(
+        "process incoming data records", limit=10, search_type="rrf", repository_id=repo_a_id
+    )
+    assert len(results_a) >= 1
+    for r in results_a:
+        _assert_belongs_to(r, repo_a_id)
+        assert "REPO_B" not in (r.docstring or "")
+
+    results_b = engine.search(
+        "process incoming data records", limit=10, search_type="rrf", repository_id=repo_b_id
+    )
+    assert len(results_b) >= 1
+    for r in results_b:
+        _assert_belongs_to(r, repo_b_id)
+        assert "REPO_A" not in (r.docstring or "")
+
+
+def test_unscoped_rrf_search_mixes_both_repositories(two_repo_engine):
+    engine, repo_a_id, repo_b_id = two_repo_engine
+
+    results = engine.search("process incoming data records", limit=10, search_type="rrf")
+
+    docstrings = " ".join(r.docstring or "" for r in results)
+    assert "REPO_A" in docstrings
+    assert "REPO_B" in docstrings, "unscoped RRF search must still see both repositories"
+
+
+def test_no_leak_via_rrf_when_querying_for_content_unique_to_the_other_repo(two_repo_engine):
+    engine, repo_a_id, repo_b_id = two_repo_engine
+
+    results = engine.search("helper function repository A", limit=10, search_type="rrf", repository_id=repo_b_id)
+
+    assert all(r.symbol_name != "helper_a" for r in results)
+    for r in results:
+        _assert_belongs_to(r, repo_b_id)
+
+
+def test_rrf_search_is_deterministic_across_repeated_calls(two_repo_engine):
+    engine, repo_a_id, repo_b_id = two_repo_engine
+
+    run1 = engine.search("process incoming data records", limit=10, search_type="rrf", repository_id=repo_a_id)
+    run2 = engine.search("process incoming data records", limit=10, search_type="rrf", repository_id=repo_a_id)
+
+    assert [r.doc_id for r in run1] == [r.doc_id for r in run2]
+    assert [r.final_score for r in run1] == [r.final_score for r in run2]
+
+
+def test_rrf_nonexistent_repository_id_returns_no_results(two_repo_engine):
+    engine, repo_a_id, repo_b_id = two_repo_engine
+    bogus_id = max(repo_a_id, repo_b_id) + 999
+
+    results = engine.search("process incoming data records", limit=10, search_type="rrf", repository_id=bogus_id)
+    assert results == []
+
+
+def test_rrf_search_genuinely_differs_from_hybrid_ranking_strategy(two_repo_engine):
+    """
+    Proves search_type="rrf" is actually wired to the RRF fusion path
+    (rank-based) rather than silently aliased to "hybrid" (weighted-score
+    fusion) -- both return SearchResultItem objects with the same shape,
+    but RRF's final_score is a genuine reciprocal-rank-sum value, never a
+    weighted-linear combination clamped to [0, 1] the way hybrid's is.
+    """
+    engine, repo_a_id, repo_b_id = two_repo_engine
+
+    hybrid_results = engine.search(
+        "process incoming data records", limit=10, search_type="hybrid", repository_id=repo_a_id
+    )
+    rrf_results = engine.search(
+        "process incoming data records", limit=10, search_type="rrf", repository_id=repo_a_id
+    )
+
+    assert len(hybrid_results) >= 1
+    assert len(rrf_results) >= 1
+    # RRF scores are real (1/(k+rank))-sum values -- with the default k=60
+    # and at most two contributing lists, they are always well under
+    # hybrid's clamped-to-1.0 weighted scores for any non-trivial corpus.
+    assert rrf_results[0].final_score < hybrid_results[0].final_score

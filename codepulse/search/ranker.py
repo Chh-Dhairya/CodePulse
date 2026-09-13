@@ -76,6 +76,7 @@ class HybridRanker:
         weight_vector: float | None = None,
         weight_graph: float | None = None,
         exact_match_boost: float | None = None,
+        rrf_k: int | None = None,
     ) -> None:
         from codepulse.config import get_settings
         settings = get_settings()
@@ -84,6 +85,57 @@ class HybridRanker:
         self.weight_graph = weight_graph if weight_graph is not None else settings.weight_graph
         self.exact_match_boost = (
             exact_match_boost if exact_match_boost is not None else settings.exact_match_boost
+        )
+        # Phase 2.3 (roadmap §37 item 2.3: "...selectable via API
+        # search_type/config") -- resolved once at construction, matching
+        # every other tunable ranking parameter above, rather than read
+        # fresh from settings on every fuse_rrf() call.
+        self.rrf_k = rrf_k if rrf_k is not None else settings.rrf_k
+
+    def _build_result_item(
+        self,
+        doc_id: str,
+        metadata: dict[str, Any],
+        *,
+        final_score: float,
+        keyword_score: float = 0.0,
+        vector_score: float = 0.0,
+        embedding_distance: float = 1.0,
+        graph_score: float = 0.0,
+    ) -> SearchResultItem:
+        """
+        Reconstructs a `SearchResultItem` from a candidate's metadata dict
+        (the same shape `BM25Index`/`VectorIndex` attach to every result --
+        `symbol_name`, `file_path`, `type`, `start_line`, `end_line`,
+        `signature`, `docstring`, `snippet`, `language`) plus whatever
+        score fields the calling fusion strategy already computed.
+
+        Phase 2.3 (roadmap §36/§37 item 2.3: "wire the already-implemented
+        (but unused) RRF fusion path to be selectable via the API") --
+        shared by both `fuse()` (weighted linear fusion) and `fuse_rrf()`
+        (Reciprocal Rank Fusion) so this metadata-to-result-object mapping
+        is never duplicated between the two fusion strategies. `fuse()`'s
+        own metadata-reconstruction logic is unchanged in behavior; it now
+        simply calls this shared helper instead of inlining the same
+        field-by-field extraction itself.
+        """
+        meta = metadata
+        return SearchResultItem(
+            doc_id=doc_id,
+            symbol_name=meta.get("symbol_name", ""),
+            file_path=meta.get("file_path", ""),
+            symbol_type=meta.get("type", "function"),
+            start_line=meta.get("start_line", 1),
+            end_line=meta.get("end_line", 1),
+            signature=meta.get("signature", ""),
+            docstring=meta.get("docstring"),
+            snippet=meta.get("snippet", meta.get("signature", "") or meta.get("symbol_name", "")),
+            language=meta.get("language", ""),
+            final_score=final_score,
+            keyword_score=keyword_score,
+            vector_score=vector_score,
+            embedding_distance=embedding_distance,
+            graph_score=graph_score,
         )
 
     def fuse(
@@ -136,14 +188,6 @@ class HybridRanker:
         for doc_id, data in candidates.items():
             meta = data["metadata"]
             sym_name = meta.get("symbol_name", "")
-            file_path = meta.get("file_path", "")
-            sym_type = meta.get("type", "function")
-            start_line = meta.get("start_line", 1)
-            end_line = meta.get("end_line", 1)
-            signature = meta.get("signature", "")
-            docstring = meta.get("docstring")
-            snippet = meta.get("snippet", signature or sym_name)
-            language = meta.get("language", "")
 
             kw_score = data["kw_score"]
             vec_score = data["vec_score"]
@@ -166,17 +210,9 @@ class HybridRanker:
             final_score = min(1.0, combined)
 
             scored_items.append(
-                SearchResultItem(
-                    doc_id=doc_id,
-                    symbol_name=sym_name,
-                    file_path=file_path,
-                    symbol_type=sym_type,
-                    start_line=start_line,
-                    end_line=end_line,
-                    signature=signature,
-                    docstring=docstring,
-                    snippet=snippet,
-                    language=language,
+                self._build_result_item(
+                    doc_id,
+                    meta,
                     final_score=final_score,
                     keyword_score=kw_score,
                     vector_score=vec_score,
@@ -193,33 +229,78 @@ class HybridRanker:
         self,
         bm25_results: list[dict[str, Any]],
         vector_results: list[dict[str, Any]],
-        k: int = 60,
+        k: int | None = None,
         top_k: int = 20,
-    ) -> list[dict[str, Any]]:
+    ) -> list[SearchResultItem]:
         """
         Reciprocal Rank Fusion (RRF) combiner.
         Formula: RRF_score(d) = sum(1 / (k + rank_i(d)))
+
+        `k` defaults to `self.rrf_k` (itself resolved from
+        `settings.rrf_k`, default 60 -- the conventional constant from the
+        original RRF paper) when not explicitly overridden by the caller.
+
+        Phase 2.3 (roadmap §36/§37 item 2.3): returns `list[SearchResultItem]`
+        -- the same return type `fuse()` already produces, and the shape
+        `IndexingEngine.search()`/`/v1/search`'s `[r.to_dict() for r in
+        results]` already expect -- rather than the raw
+        `{"doc_id", "rrf_score", "metadata"}` dicts this method returned
+        before this milestone wired it up to the API. The fusion algorithm
+        itself (the RRF formula/ranking below) is unchanged; only the
+        final step -- turning a ranked (doc_id, score) list into full
+        result objects -- was added, reusing `_build_result_item` so this
+        mapping is never duplicated against `fuse()`'s own.
+
+        `final_score`/`relevance_score` on the returned items is the real,
+        computed RRF score (unbounded above 0, not rescaled/clamped to
+        [0, 1] the way `fuse()`'s weighted-linear score is) -- reporting
+        the genuine computed value rather than inventing a normalization
+        the roadmap does not ask for (CLAUDE.md: no fabricated metrics).
+        `keyword_score`/`vector_score` are still populated from each
+        candidate's own real, already-computed per-source score (the same
+        values `fuse()` reads), even though RRF itself combines by rank,
+        not by these scores -- for transparency, not because RRF's own
+        formula uses them. `graph_score` is always 0.0: `fuse_rrf` does
+        not accept a `graph_scores` argument (unchanged from before this
+        milestone -- adding call-graph fusion to RRF would be a ranking
+        algorithm change, out of this milestone's scope, which only wires
+        up the already-implemented, unmodified RRF formula).
         """
+        effective_k = k if k is not None else self.rrf_k
+
         rrf_scores: dict[str, float] = {}
         metadata_map: dict[str, dict[str, Any]] = {}
+        kw_score_map: dict[str, float] = {}
+        vec_score_map: dict[str, float] = {}
+        emb_dist_map: dict[str, float] = {}
 
         for rank, item in enumerate(bm25_results, start=1):
             doc_id = item["doc_id"]
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (k + rank))
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (effective_k + rank))
             metadata_map[doc_id] = item.get("metadata", {})
+            kw_score_map[doc_id] = item.get("normalized_score", 0.0)
 
         for rank, item in enumerate(vector_results, start=1):
             doc_id = item["doc_id"]
-            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (k + rank))
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + (1.0 / (effective_k + rank))
             if doc_id not in metadata_map:
                 metadata_map[doc_id] = item.get("metadata", {})
+            vec_score_map[doc_id] = item.get("relevance_score", 0.0)
+            emb_dist_map[doc_id] = item.get("embedding_distance", 1.0)
 
         sorted_docs = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        results = []
+
+        results: list[SearchResultItem] = []
         for doc_id, score in sorted_docs[:top_k]:
-            results.append({
-                "doc_id": doc_id,
-                "rrf_score": score,
-                "metadata": metadata_map.get(doc_id, {}),
-            })
+            results.append(
+                self._build_result_item(
+                    doc_id,
+                    metadata_map.get(doc_id, {}),
+                    final_score=score,
+                    keyword_score=kw_score_map.get(doc_id, 0.0),
+                    vector_score=vec_score_map.get(doc_id, 0.0),
+                    embedding_distance=emb_dist_map.get(doc_id, 1.0),
+                    graph_score=0.0,
+                )
+            )
         return results

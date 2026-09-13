@@ -102,7 +102,9 @@ class SearchRequest(BaseModel):
     repository_id: Optional[int] = 1
     query: str
     limit: int = Field(default=20, ge=1, le=100)
-    search_type: str = Field(default="hybrid", pattern="^(hybrid|keyword|semantic)$")
+    # Phase 2.3 (roadmap §37 item 2.3): "rrf" added -- the already-
+    # implemented Reciprocal Rank Fusion path, now selectable here.
+    search_type: str = Field(default="hybrid", pattern="^(hybrid|keyword|semantic|rrf)$")
 
 
 class IndexRepoRequest(BaseModel):

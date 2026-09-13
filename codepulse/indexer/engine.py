@@ -820,7 +820,7 @@ class IndexingEngine:
         self,
         query: str,
         limit: int = 20,
-        search_type: str = "hybrid",  # "keyword", "semantic", "hybrid"
+        search_type: str = "hybrid",  # "keyword", "semantic", "hybrid", "rrf"
         repository_id: int | None = None,
     ) -> list[SearchResultItem]:
         """
@@ -865,6 +865,28 @@ class IndexingEngine:
             query_vec = self.embedder.encode(query)
             vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool))
             return self.ranker.fuse(query, bm25_results=[], vector_results=vector_res, top_k=limit)
+
+        elif search_type == "rrf":
+            # Phase 2.3 (roadmap §36/§37 item 2.3): the already-implemented
+            # Reciprocal Rank Fusion path, now reachable via `search_type`.
+            # Candidate generation and repository-scoping are unchanged
+            # from -- and pool-sized identically to -- the "hybrid" branch
+            # below, so RRF is isolated exactly as strongly as weighted
+            # fusion already is; only the final fusion step differs (rank-
+            # based RRF instead of weighted-linear combination). No
+            # call-graph signal is computed here: `HybridRanker.fuse_rrf`
+            # does not accept one (unchanged from before this milestone --
+            # extending RRF's own formula to fuse graph scores would be a
+            # ranking-algorithm change, out of this milestone's scope,
+            # which only wires up the existing, unmodified RRF formula).
+            bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit * 2
+            vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit * 2
+
+            bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
+            query_vec = self.embedder.encode(query)
+            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool))
+
+            return self.ranker.fuse_rrf(bm25_results=bm25_res, vector_results=vector_res, top_k=limit)
 
         else:  # hybrid
             bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit * 2

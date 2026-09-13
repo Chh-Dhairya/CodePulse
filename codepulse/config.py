@@ -71,6 +71,18 @@ class CodePulseConfig(BaseModel):
         default=0.75,
         description="BM25 b document length normalization parameter",
     )
+    rrf_k: int = Field(
+        default=60,
+        description=(
+            "Reciprocal Rank Fusion (RRF) smoothing constant (roadmap §37 "
+            "item 2.3: RRF fusion path wired to be selectable via API "
+            "search_type/config). Formula: RRF_score(d) = sum(1 / (k + "
+            "rank_i(d))). 60 is the conventional default used in the "
+            "original RRF paper and most implementations -- not a "
+            "benchmarked figure for this project specifically; tune via "
+            "config/env for a given workload."
+        ),
+    )
 
     # Server / API Settings
     server_host: str = Field(
@@ -239,6 +251,7 @@ def _normalize_toml_dict(raw: dict[str, Any]) -> dict[str, Any]:
             "exact_match_boost",
             "bm25_k1",
             "bm25_b",
+            "rrf_k",
         ):
             if key in search:
                 normalized[key] = search[key]
@@ -273,6 +286,7 @@ _ENV_VAR_MAPPINGS: dict[str, str] = {
     "CODEPULSE_EXACT_MATCH_BOOST": "exact_match_boost",
     "CODEPULSE_BM25_K1": "bm25_k1",
     "CODEPULSE_BM25_B": "bm25_b",
+    "CODEPULSE_RRF_K": "rrf_k",
     "CODEPULSE_SERVER_HOST": "server_host",
     "CODEPULSE_HOST": "server_host",
     "CODEPULSE_SERVER_PORT": "server_port",

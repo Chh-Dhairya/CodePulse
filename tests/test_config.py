@@ -53,6 +53,7 @@ def test_builtin_defaults_loaded():
     assert config.exact_match_boost == 0.15
     assert config.bm25_k1 == 1.5
     assert config.bm25_b == 0.75
+    assert config.rrf_k == 60
     assert config.server_host == "127.0.0.1"
     assert config.server_port == 8000
     assert config.cors_origins == []
@@ -89,6 +90,7 @@ def test_toml_overrides_defaults():
     exact_match_boost = 0.25
     bm25_k1 = 1.8
     bm25_b = 0.80
+    rrf_k = 40
 
     [server]
     host = "0.0.0.0"
@@ -115,6 +117,7 @@ def test_toml_overrides_defaults():
         assert config.exact_match_boost == 0.25
         assert config.bm25_k1 == 1.8
         assert config.bm25_b == 0.80
+        assert config.rrf_k == 40
         assert config.server_host == "0.0.0.0"
         assert config.server_port == 9000
         assert config.cors_origins == ["https://app.codepulse.dev"]
@@ -138,11 +141,13 @@ def test_environment_variables_override_toml(monkeypatch):
         monkeypatch.setenv("CODEPULSE_DB_URL", "sqlite:///from_env.db")
         monkeypatch.setenv("CODEPULSE_SERVER_PORT", "9999")
         monkeypatch.setenv("CODEPULSE_EMBEDDING_MODEL", "env-model-v1")
+        monkeypatch.setenv("CODEPULSE_RRF_K", "25")
 
         config = load_config(config_file=temp_path)
         assert config.db_url == "sqlite:///from_env.db"
         assert config.server_port == 9999
         assert config.embedding_model == "env-model-v1"
+        assert config.rrf_k == 25
     finally:
         Path(temp_path).unlink(missing_ok=True)
 
@@ -203,6 +208,7 @@ def test_full_precedence_chain(monkeypatch):
         # 4. weight_keyword: Only in Defaults -> Defaults win
         assert config.weight_keyword == 0.40
         assert config.bm25_k1 == 1.5
+        assert config.rrf_k == 60
     finally:
         Path(temp_path).unlink(missing_ok=True)
 
@@ -248,6 +254,7 @@ def test_components_use_configured_settings(monkeypatch):
         exact_match_boost=0.30,
         bm25_k1=2.0,
         bm25_b=0.90,
+        rrf_k=15,
     )
     set_settings(custom_config)
 
@@ -276,3 +283,6 @@ def test_components_use_configured_settings(monkeypatch):
     bm25 = BM25Index()
     assert bm25.k1 == 2.0
     assert bm25.b == 0.90
+
+    # 6. HybridRanker's rrf_k (Phase 2.3)
+    assert ranker.rrf_k == 15
