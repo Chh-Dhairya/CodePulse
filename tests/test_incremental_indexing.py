@@ -1,27 +1,37 @@
 """
-Phase 3.1 — Git-diff based incremental indexing, engine-level integration
-tests (roadmap §37 item 3.1; §9 Incremental Indexing Design).
+Phase 3.1/3.2 — Git-diff based incremental indexing, including rename/
+move detection + symbol re-keying, engine-level integration tests
+(roadmap §37 items 3.1 and 3.2; §9 Incremental Indexing Design).
 
 Unit-level coverage for the individual new primitives already exists
 elsewhere and is NOT duplicated here:
-  - `codepulse/git_diff.py` itself: tests/test_git_diff.py
+  - `codepulse/git_diff.py` itself, INCLUDING rename detection: tests/test_git_diff.py
   - `BM25Index.remove_docs`: tests/test_tantivy_lexical_index.py
   - `VectorIndex.remove_docs` + the monotonic-rowid fix: tests/test_sqlite_vec_semantic_index.py
 
 This file exercises `IndexingEngine.index_directory()` end-to-end against
 real, temporary git repositories (created fresh under `tmp_path` via the
 real `git` binary), proving the actual wiring: `_plan_incremental_run`,
-the `all_files` filtering, `_purge_stale_entries`, the call-graph-
-completeness merge, the corrected (non-fabricated) `file_count`/
-`symbol_count`, and `_record_snapshot` all working together correctly --
-covering exactly what unit tests of the pieces in isolation cannot prove.
+the `all_files` filtering, `_purge_stale_entries`, `_rekey_renamed_files`,
+the call-graph-completeness merge, the corrected (non-fabricated)
+`file_count`/`symbol_count`, and `_record_snapshot` all working together
+correctly -- covering exactly what unit tests of the pieces in isolation
+cannot prove.
 
-Scope boundary (unchanged from the rest of Phase 3.1): rename/move
-detection (3.2), symbol-level body_hash skip-embedding (3.3), call-graph
-confidence scoring (3.4), and local BFS incremental graph updates (3.5)
-are NOT implemented and NOT tested here -- only git-diff-based
-added/modified/deleted detection wired into the existing indexing
-pipeline.
+Phase 3.2 scope, exactly as audited and confirmed with the user before
+implementation (see CODEPULSE_PROGRESS.md): file-level re-keying only.
+A PURE rename (no content change) fully preserves every `File`/`Symbol`/
+`Embedding` id, verified directly below. A rename that ALSO edits
+content such that a symbol's own `start_line` shifts is NOT specially
+handled -- that symbol falls back to today's existing, pre-existing
+Phase 0.4 behavior (a fresh id), exactly as an ordinary modified file
+already does; this is a deliberate, disclosed scope boundary, not a gap
+introduced by this milestone.
+
+Scope boundary (unchanged from the rest of Phase 3): symbol-level
+body_hash skip-embedding (3.3), call-graph confidence scoring (3.4), and
+local BFS incremental graph updates (3.5) are NOT implemented and NOT
+tested here.
 
 All tests use temporary, disposable SQLite databases and temporary git
 repositories under `tmp_path` -- never the production codepulse.db.
@@ -455,5 +465,273 @@ def test_repository_snapshot_recorded_after_full_and_incremental_runs(tmp_path, 
         for snap in snapshots:
             assert snap.embedding_model == engine.embedder.model_name
             assert snap.embedding_dim == engine.embedder.dimension
+    finally:
+        session.close()
+
+
+# --- Phase 3.2: rename/move detection + symbol re-keying --------------------
+
+def test_pure_rename_preserves_file_symbol_and_embedding_ids(tmp_path, shared_embedder):
+    repo = tmp_path / "repo_pure_rename"
+    _init_repo(repo)
+    _write(repo, "old_name.py", ALPHA)
+    _write(repo, "keep.py", BETA)
+    _write(repo, "keep2.py", GAMMA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "pure_rename.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+
+    session = engine.storage.get_session()
+    try:
+        fm_before = session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "old_name.py"
+        ).first()
+        file_id_before = fm_before.id
+        sym_before = session.query(SymbolModel).filter(SymbolModel.file_id == file_id_before).first()
+        symbol_id_before = sym_before.id
+        emb_before = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == symbol_id_before).first()
+        embedding_id_before = emb_before.id if emb_before else None
+    finally:
+        session.close()
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    _commit_all(repo, "rename old_name.py to new_name.py")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["incremental"] is True
+    assert result2["renamed_files"] == [{"old": "old_name.py", "new": "new_name.py"}]
+
+    session = engine.storage.get_session()
+    try:
+        # The row moved, not a delete+recreate -- no row left at the old path.
+        assert session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "old_name.py"
+        ).first() is None
+
+        fm_after = session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "new_name.py"
+        ).first()
+        assert fm_after is not None
+        assert fm_after.id == file_id_before, "File.id must be preserved across a pure rename"
+
+        sym_after = session.query(SymbolModel).filter(SymbolModel.file_id == fm_after.id).first()
+        assert sym_after is not None
+        assert sym_after.id == symbol_id_before, "Symbol.id must be preserved across a pure rename"
+        assert sym_after.name == "alpha"
+
+        if embedding_id_before is not None:
+            emb_after = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sym_after.id).first()
+            assert emb_after is not None
+            assert emb_after.id == embedding_id_before, "Embedding.id must be preserved across a pure rename"
+    finally:
+        session.close()
+
+    # Repository-wide totals must reflect reality: still 3 files, unaffected
+    # by the rename (not fewer, not more).
+    session = engine.storage.get_session()
+    try:
+        repo_row = session.query(RepositoryModel).filter(RepositoryModel.id == repo_id).first()
+        assert repo_row.file_count == 3
+    finally:
+        session.close()
+
+
+def test_pure_rename_moves_search_results_to_the_new_path(tmp_path, shared_embedder):
+    repo = tmp_path / "repo_rename_search"
+    _init_repo(repo)
+    _write(repo, "old_name.py", ALPHA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "rename_search.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+
+    before = engine.search("alpha", limit=5, search_type="keyword", repository_id=repo_id)
+    assert any(r.file_path == "old_name.py" for r in before)
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    _commit_all(repo, "rename")
+    engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+
+    after = engine.search("alpha", limit=5, search_type="keyword", repository_id=repo_id)
+    assert len(after) >= 1
+    assert all(r.file_path != "old_name.py" for r in after), "no result must still reference the old path"
+    assert any(r.file_path == "new_name.py" for r in after)
+    for r in after:
+        assert not r.doc_id.startswith(f"{repo_id}::old_name.py::"), "stale old-path doc_id must be gone"
+
+
+def test_rename_with_a_content_edit_updates_the_matched_symbol_in_place(tmp_path, shared_embedder):
+    repo = tmp_path / "repo_rename_edit"
+    _init_repo(repo)
+    _write(repo, "old_name.py", ALPHA)
+    _write(repo, "keep.py", BETA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "rename_edit.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+
+    session = engine.storage.get_session()
+    try:
+        fm_before = session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "old_name.py"
+        ).first()
+        sym_before = session.query(SymbolModel).filter(SymbolModel.file_id == fm_before.id).first()
+        symbol_id_before = sym_before.id
+    finally:
+        session.close()
+
+    # Rename AND edit the symbol's body -- name and start_line both stay
+    # the same, only the returned value changes.
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    (repo / "new_name.py").write_text(
+        'def alpha():\n    """First function, alpha."""\n    return 999\n', encoding="utf-8"
+    )
+    _commit_all(repo, "rename with edit")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["renamed_files"] == [{"old": "old_name.py", "new": "new_name.py"}]
+
+    session = engine.storage.get_session()
+    try:
+        fm_after = session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "new_name.py"
+        ).first()
+        sym_after = session.query(SymbolModel).filter(SymbolModel.file_id == fm_after.id).first()
+        assert sym_after.id == symbol_id_before, "matched symbol (same name, same start_line) keeps its id"
+        assert "999" in sym_after.body, "the symbol's content must actually be updated, not just re-keyed"
+    finally:
+        session.close()
+
+
+def test_rekey_renamed_files_is_a_safe_no_op_when_the_old_path_was_never_indexed(tmp_path, shared_embedder):
+    """Defensive fallback (matches the roadmap's own risk-register
+    mitigation: fall back to delete+recreate rather than a risky guess).
+    `old_name.py` is tracked by git (so git still reports the rename) but
+    was never actually indexed by this engine (excluded by
+    `.codepulseignore`), so there is no existing File row to re-key --
+    `_rekey_renamed_files` must skip it cleanly and `new_name.py` must
+    still be indexed normally as a fresh file."""
+    repo = tmp_path / "repo_rename_no_prior_row"
+    _init_repo(repo)
+    _write(repo, ".codepulseignore", "old_name.py\n")
+    _write(repo, "old_name.py", ALPHA)
+    _write(repo, "keep.py", BETA)
+    _write(repo, "keep2.py", 'def k2():\n    """Keep2."""\n    return 21\n')
+    _write(repo, "keep3.py", 'def k3():\n    """Keep3."""\n    return 22\n')
+    _commit_all(repo, "initial")
+    # Only keep.py/keep2.py/keep3.py count toward file_count (old_name.py
+    # is ignored) -- the single rename below (1 of 3) stays comfortably
+    # under the default 50% incremental threshold.
+
+    engine = _new_engine(_db_url(tmp_path, "rename_no_prior_row.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+
+    session = engine.storage.get_session()
+    try:
+        assert session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "old_name.py"
+        ).first() is None, "old_name.py must never have been indexed (ignored)"
+    finally:
+        session.close()
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    _commit_all(repo, "rename an ignored file")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["renamed_files"] == [{"old": "old_name.py", "new": "new_name.py"}]
+
+    session = engine.storage.get_session()
+    try:
+        fm = session.query(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "new_name.py"
+        ).first()
+        assert fm is not None, "new_name.py must be indexed normally despite the failed re-key"
+        sym = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).first()
+        assert sym is not None and sym.name == "alpha"
+    finally:
+        session.close()
+
+
+def test_call_graph_reflects_the_new_path_after_a_rename(tmp_path, shared_embedder):
+    repo = tmp_path / "repo_rename_callgraph"
+    _init_repo(repo)
+    _write(
+        repo,
+        "old_name.py",
+        'def helper():\n    """A helper."""\n    return 1\n\n\n'
+        'def caller():\n    """Calls helper."""\n    return helper()\n',
+    )
+    _write(repo, "keep.py", BETA)
+    _write(repo, "keep2.py", GAMMA)
+    _commit_all(repo, "initial")
+    # 3 files total; renaming 1 of them stays under the 50% threshold.
+
+    engine = _new_engine(_db_url(tmp_path, "rename_callgraph.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+    edges_before = len(engine.call_graphs[repo_id].edges)
+    assert edges_before >= 1
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    _commit_all(repo, "rename")
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["incremental"] is True
+
+    edges_after = engine.call_graphs[repo_id].edges
+    assert len(edges_after) == edges_before
+    assert all(e.source_file != "old_name.py" and e.target_file != "old_name.py" for e in edges_after), (
+        "the in-memory call graph must reflect the renamed file's new path, not the old one"
+    )
+
+
+def test_renamed_file_and_an_unrelated_addition_together(tmp_path, shared_embedder):
+    """A rename combined with an ordinary add in the same commit -- proves
+    `changed_relpaths`/`_purge_stale_entries` correctly separate the two
+    (the rename's new path must NOT be purged as if it were a plain
+    modified file -- see the ordering fix in `index_directory`)."""
+    repo = tmp_path / "repo_rename_plus_add"
+    _init_repo(repo)
+    _write(repo, "old_name.py", ALPHA)
+    _write(repo, "keep.py", BETA)
+    _write(repo, "keep2.py", GAMMA)
+    _write(repo, "keep3.py", 'def k3():\n    """Keep3."""\n    return 23\n')
+    _write(repo, "keep4.py", 'def k4():\n    """Keep4."""\n    return 24\n')
+    _commit_all(repo, "initial")
+    # 5 files total; rename(1) + add(1, not counted against the prior
+    # total) stays under the 50% threshold (1/5 = 20%).
+
+    engine = _new_engine(_db_url(tmp_path, "rename_plus_add.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+    session = engine.storage.get_session()
+    try:
+        symbol_id_before = session.query(SymbolModel).join(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "old_name.py"
+        ).first().id
+    finally:
+        session.close()
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    _write(repo, "added.py", GAMMA)
+    _commit_all(repo, "rename plus add")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["incremental"] is True
+    assert result2["renamed_files"] == [{"old": "old_name.py", "new": "new_name.py"}]
+    assert result2["total_files"] == 2, "only new_name.py (renamed) and added.py (new) should be reparsed"
+
+    session = engine.storage.get_session()
+    try:
+        paths = {f.path for f in session.query(FileModel).filter(FileModel.repo_id == repo_id).all()}
+        assert paths == {"new_name.py", "keep.py", "keep2.py", "keep3.py", "keep4.py", "added.py"}
+        sym_after = session.query(SymbolModel).join(FileModel).filter(
+            FileModel.repo_id == repo_id, FileModel.path == "new_name.py"
+        ).first()
+        assert sym_after.id == symbol_id_before, "the rename must have re-keyed, not purged, the existing symbol"
     finally:
         session.close()

@@ -37,16 +37,21 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class IncrementalPlan:
     """
-    Phase 3.1 -- the outcome of `IndexingEngine._plan_incremental_run`.
+    Phase 3.1/3.2 -- the outcome of `IndexingEngine._plan_incremental_run`.
 
     `is_incremental=False` means `index_directory()` must process every
     discovered file exactly as it always has (this milestone's baseline,
     unchanged, safety-net behavior) -- `changed_relpaths` is then
     meaningless and always `None`. `is_incremental=True` means only the
-    files in `changed_relpaths` (added + modified; possibly an empty set
-    if nothing changed since the last indexed commit) need to be parsed,
-    and `deleted_relpaths` names files whose stale rows/index-entries
-    must be removed.
+    files in `changed_relpaths` (added + modified + a rename's NEW path;
+    possibly an empty set if nothing changed since the last indexed
+    commit) need to be parsed, `deleted_relpaths` names files whose
+    stale rows/index-entries must be removed, and `renamed` (Phase 3.2)
+    names `(old_path, new_path)` pairs whose EXISTING `File`/`Symbol`/
+    `Embedding` rows must be re-keyed to the new path in place --
+    NEITHER purged (they are not gone) NOR treated as a fresh add
+    (their identity/ids must be preserved) the way `changed_relpaths`/
+    `deleted_relpaths` are.
 
     `reason` is a real, human-readable explanation of which of §9's own
     "when a full re-index is still required" conditions applied (or,
@@ -59,6 +64,7 @@ class IncrementalPlan:
     is_incremental: bool
     changed_relpaths: set[str] | None
     deleted_relpaths: list[str] = field(default_factory=list)
+    renamed: list[tuple[str, str]] = field(default_factory=list)
     reason: str = ""
 
 # Files/folders to ignore during indexing
@@ -209,11 +215,17 @@ class IndexingEngine:
 
         settings = get_settings()
         if not settings.incremental_indexing_enabled:
-            return IncrementalPlan(False, None, [], "incremental indexing disabled via config")
+            return IncrementalPlan(
+                is_incremental=False, changed_relpaths=None,
+                reason="incremental indexing disabled via config",
+            )
 
         current_commit = get_head_commit_sha(repo_path)
         if current_commit is None:
-            return IncrementalPlan(False, None, [], "not a git repository (or a git repository with no commits yet)")
+            return IncrementalPlan(
+                is_incremental=False, changed_relpaths=None,
+                reason="not a git repository (or a git repository with no commits yet)",
+            )
 
         session = self.storage.get_session()
         try:
@@ -230,7 +242,10 @@ class IndexingEngine:
             session.close()
 
         if last_snapshot is None:
-            return IncrementalPlan(False, None, [], "no prior successful git-backed snapshot exists for this repository")
+            return IncrementalPlan(
+                is_incremental=False, changed_relpaths=None,
+                reason="no prior successful git-backed snapshot exists for this repository",
+            )
 
         # Checked only once we know a real prior snapshot exists (a first
         # run never reaches here) -- see this method's own docstring for
@@ -238,48 +253,87 @@ class IndexingEngine:
         # restart) must also force a full run.
         if repo_id not in self.call_graphs:
             return IncrementalPlan(
-                False, None, [],
-                "no in-memory call graph cached yet for this repository in this "
-                "process (e.g. after a restart) -- a full re-index is needed to "
-                "fully restore it",
+                is_incremental=False, changed_relpaths=None,
+                reason=(
+                    "no in-memory call graph cached yet for this repository in this "
+                    "process (e.g. after a restart) -- a full re-index is needed to "
+                    "fully restore it"
+                ),
             )
 
         if last_snapshot.embedding_model != self.embedder.model_name or last_snapshot.embedding_dim != self.embedder.dimension:
             return IncrementalPlan(
-                False, None, [],
-                f"embedding model/dimension changed since the last snapshot "
-                f"({last_snapshot.embedding_model}/{last_snapshot.embedding_dim} -> "
-                f"{self.embedder.model_name}/{self.embedder.dimension})",
+                is_incremental=False, changed_relpaths=None,
+                reason=(
+                    f"embedding model/dimension changed since the last snapshot "
+                    f"({last_snapshot.embedding_model}/{last_snapshot.embedding_dim} -> "
+                    f"{self.embedder.model_name}/{self.embedder.dimension})"
+                ),
             )
 
         if last_snapshot.commit_sha == current_commit:
             # Nothing changed at all -- still a real, valid incremental
             # outcome (an empty changeset), not a failure or a reason to
             # fall back to a full walk.
-            return IncrementalPlan(True, set(), [], f"no changes since the last indexed commit {current_commit[:8]}")
+            return IncrementalPlan(
+                is_incremental=True, changed_relpaths=set(),
+                reason=f"no changes since the last indexed commit {current_commit[:8]}",
+            )
 
         try:
             changes = detect_file_changes(repo_path, since_commit=last_snapshot.commit_sha)
         except GitDiffError as e:
-            return IncrementalPlan(False, None, [], f"git-diff change detection failed, falling back to a full re-index: {e}")
+            return IncrementalPlan(
+                is_incremental=False, changed_relpaths=None,
+                reason=f"git-diff change detection failed, falling back to a full re-index: {e}",
+            )
 
         if prior_file_count > 0:
             changed_fraction = changes.total_changed / prior_file_count
             if changed_fraction > settings.incremental_max_changed_file_fraction:
                 return IncrementalPlan(
-                    False, None, [],
-                    f"{changes.total_changed} of {prior_file_count} previously-indexed files changed "
-                    f"({changed_fraction:.0%}), exceeding the {settings.incremental_max_changed_file_fraction:.0%} "
-                    f"incremental threshold -- a full re-index is cheaper",
+                    is_incremental=False, changed_relpaths=None,
+                    reason=(
+                        f"{changes.total_changed} of {prior_file_count} previously-indexed files changed "
+                        f"({changed_fraction:.0%}), exceeding the {settings.incremental_max_changed_file_fraction:.0%} "
+                        f"incremental threshold -- a full re-index is cheaper"
+                    ),
                 )
 
         return IncrementalPlan(
-            True,
-            set(changes.changed_or_added),
-            changes.deleted,
-            f"incremental run since commit {last_snapshot.commit_sha[:8]}: "
-            f"{len(changes.added)} added, {len(changes.modified)} modified, {len(changes.deleted)} deleted",
+            is_incremental=True,
+            changed_relpaths=set(changes.changed_or_added),
+            deleted_relpaths=changes.deleted,
+            renamed=changes.renamed,
+            reason=(
+                f"incremental run since commit {last_snapshot.commit_sha[:8]}: "
+                f"{len(changes.added)} added, {len(changes.modified)} modified, "
+                f"{len(changes.deleted)} deleted, {len(changes.renamed)} renamed"
+            ),
         )
+
+    @staticmethod
+    def _doc_ids_for_file(session, repo_id: int, fm: FileModel) -> tuple[list[str], list[str]]:
+        """
+        Phase 3.1/3.2 -- computes the exact `BM25Index`/`VectorIndex`
+        `doc_id` strings for every symbol currently associated with the
+        given `FileModel` row, from the *durable* `Symbol`/`Embedding`
+        rows (not from potentially-incomplete in-memory state). Shared
+        by `_purge_stale_entries` (which then deletes the rows too) and
+        `_rekey_renamed_files` (which does NOT delete the rows -- it
+        re-keys them to a new path instead), since both need the exact
+        same doc_id-reconstruction logic, computed against the file's
+        CURRENT (pre-change) `path`.
+        """
+        bm25_doc_ids: list[str] = []
+        vector_doc_ids: list[str] = []
+        symbol_rows = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
+        for sm in symbol_rows:
+            bm25_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}")
+            embedding_rows = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
+            for em in embedding_rows:
+                vector_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}::{em.chunk_index}")
+        return bm25_doc_ids, vector_doc_ids
 
     def _purge_stale_entries(self, repo_id: int, relpaths: list[str]) -> None:
         """
@@ -329,14 +383,9 @@ class IndexingEngine:
             bm25_doc_ids: list[str] = []
             vector_doc_ids: list[str] = []
             for fm in file_rows:
-                symbol_rows = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
-                for sm in symbol_rows:
-                    bm25_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}")
-                    embedding_rows = (
-                        session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
-                    )
-                    for em in embedding_rows:
-                        vector_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}::{em.chunk_index}")
+                fm_bm25_ids, fm_vector_ids = self._doc_ids_for_file(session, repo_id, fm)
+                bm25_doc_ids.extend(fm_bm25_ids)
+                vector_doc_ids.extend(fm_vector_ids)
 
             for fm in file_rows:
                 session.delete(fm)
@@ -354,6 +403,102 @@ class IndexingEngine:
             self.symbol_repo_map.pop(doc_id, None)
         for relpath in relpaths:
             self.parse_results.pop(f"{repo_id}::{relpath}", None)
+
+    def _rekey_renamed_files(self, repo_id: int, renamed_pairs: list[tuple[str, str]]) -> None:
+        """
+        Phase 3.2 (roadmap §37 item 3.2: "Rename/move detection + symbol
+        re-keying"; §9: "re-key existing Symbol/Embedding rows to the
+        new path instead of delete+recreate -- this preserves symbol
+        IDs"). For each `(old_path, new_path)` pair git identified as a
+        rename/move:
+
+          1. Finds the EXISTING `FileModel` row at `(repo_id, old_path)`.
+          2. Removes its symbols' CURRENT (old-path-encoded) `BM25Index`/
+             `VectorIndex` doc_ids -- these strings embed the file path,
+             so they go stale the moment the path changes, even though
+             nothing about the underlying `Symbol`/`Embedding` DB rows
+             needs to change. Does NOT delete the DB rows themselves --
+             unlike `_purge_stale_entries`, which this deliberately does
+             NOT call, since those rows are being preserved, not removed.
+          3. Updates that row's `path` column to `new_path` IN PLACE (a
+             plain `UPDATE`, not delete+insert) -- this is the crux of
+             "re-keying": `file_id` (and therefore every associated
+             `Symbol.id`/`Embedding.id`, via the existing, unchanged
+             `file_id` foreign key) is preserved exactly.
+
+        `new_path` is expected to be included in this run's
+        `changed_relpaths` (by `_plan_incremental_run`, via
+        `ChangeSet.changed_or_added`) so it gets parsed normally by the
+        ordinary "Parse files" step immediately after this method runs
+        -- when `_persist_to_db`'s File-upsert-by-`(repo_id, path)`
+        lookup runs for `new_path`, it will find this ALREADY-re-keyed
+        row and correctly treat it as an existing file being updated in
+        place (matched-by-natural-key, per the existing Phase 0.4
+        `Symbol` upsert), not a brand new one -- for a pure rename (byte-
+        identical content), every symbol's `(name, start_line)` is
+        unchanged, so every existing `Symbol` row is reused untouched,
+        fully satisfying "preserves symbol IDs" for that common case.
+
+        Scope boundary, explicitly NOT solved here (a deliberate,
+        disclosed choice for this milestone -- see CODEPULSE_PROGRESS.md):
+        for a rename that ALSO edits content such that a symbol's own
+        `start_line` shifts, that one symbol will not be matched by the
+        existing `(file_id, name, start_line)` key and will be treated
+        as a fresh symbol (a new id) the same way an ordinary modified
+        file already behaves today -- a pre-existing Phase 0.4 limitation
+        (no `(name, type)`-based, start_line-independent matching exists
+        anywhere in this codebase yet), not something this milestone
+        newly introduces or is required to fix. `DependencyModel` rows
+        recorded before the rename also keep referencing the OLD path
+        string (call graph edges are never deduped/corrected across a
+        rename, or across any other kind of re-index -- a pre-existing
+        gap explicitly assigned to roadmap items 3.4/3.5's "Call graph
+        updates" work, not 3.2's).
+
+        Conservative fallback (matching the roadmap's own risk-register
+        mitigation: "fallback to delete+recreate rather than a risky
+        guess"): if no existing row is found at `old_path` (e.g. it was
+        never actually indexed before), re-keying is skipped for that
+        pair with a logged warning -- `new_path` still gets indexed
+        normally as a fresh file via the ordinary parse loop, since it
+        is already part of `changed_relpaths` regardless.
+        """
+        if not renamed_pairs:
+            return
+
+        for old_path, new_path in renamed_pairs:
+            session = self.storage.get_session()
+            try:
+                fm = (
+                    session.query(FileModel)
+                    .filter(FileModel.repo_id == repo_id)
+                    .filter(FileModel.path == old_path)
+                    .first()
+                )
+                if fm is None:
+                    logger.warning(
+                        "Rename detected (%s -> %s) but no existing File row found "
+                        "for repo_id=%s at the old path -- skipping re-key; %s will "
+                        "be indexed as a fresh file instead.",
+                        old_path, new_path, repo_id, new_path,
+                    )
+                    continue
+
+                bm25_doc_ids, vector_doc_ids = self._doc_ids_for_file(session, repo_id, fm)
+                fm.path = new_path
+                session.commit()
+            finally:
+                session.close()
+
+            if bm25_doc_ids:
+                self.bm25_index.remove_docs(bm25_doc_ids)
+                self.bm25_index.build()
+            if vector_doc_ids:
+                self.vector_index.remove_docs(vector_doc_ids)
+            for doc_id in bm25_doc_ids:
+                self.symbols_by_id.pop(doc_id, None)
+                self.symbol_repo_map.pop(doc_id, None)
+            self.parse_results.pop(f"{repo_id}::{old_path}", None)
 
     def _record_snapshot(self, repo_id: int, repo_path: str) -> None:
         """
@@ -472,18 +617,19 @@ class IndexingEngine:
 
         # Phase 3.1: when incremental, restrict the (expensive) parse/
         # chunk/embed loop below to just the files git-diff says were
-        # added or modified -- unchanged files are neither re-read nor
-        # re-parsed, which is the whole cost-saving point of §9. Deleted
-        # files are never in `all_files` to begin with (they no longer
-        # exist on disk to discover); together with modified files, they
-        # are handled by `_purge_stale_entries` immediately below (BEFORE
-        # the parse loop, specifically so a modified file's OLD doc_id
-        # entries are gone before its freshly re-parsed symbols are
-        # re-added under the same doc_id strings -- see
-        # `_purge_stale_entries`'s own docstring for why this ordering
-        # matters). A full run (`is_incremental=False`) leaves `all_files`
-        # untouched and skips this block entirely, exactly matching every
-        # pre-Phase-3.1 run's behavior.
+        # added, modified, or renamed/moved (a rename's NEW path) --
+        # unchanged files are neither re-read nor re-parsed, which is the
+        # whole cost-saving point of §9. Deleted files are never in
+        # `all_files` to begin with (they no longer exist on disk to
+        # discover); together with modified files, they are handled by
+        # `_purge_stale_entries` immediately below (BEFORE the parse
+        # loop, specifically so a modified file's OLD doc_id entries are
+        # gone before its freshly re-parsed symbols are re-added under
+        # the same doc_id strings -- see `_purge_stale_entries`'s own
+        # docstring for why this ordering matters). A full run
+        # (`is_incremental=False`) leaves `all_files` untouched and skips
+        # this block entirely, exactly matching every pre-Phase-3.1 run's
+        # behavior.
         if incremental_plan.is_incremental and incremental_plan.changed_relpaths is not None:
             changed_set = incremental_plan.changed_relpaths
             all_files = [
@@ -493,12 +639,27 @@ class IndexingEngine:
             ]
             total_files = len(all_files)
             logger.info(
-                "Incremental run for repo_id=%s: %s -- parsing %d changed/added file(s)",
+                "Incremental run for repo_id=%s: %s -- parsing %d changed/added/renamed file(s)",
                 repo_id,
                 incremental_plan.reason,
                 total_files,
             )
-            stale_paths = sorted(changed_set | set(incremental_plan.deleted_relpaths))
+            # Phase 3.2: re-key renamed files' EXISTING File/Symbol/
+            # Embedding rows to their new path FIRST -- this must happen
+            # BEFORE `_purge_stale_entries` below, and a renamed file's
+            # NEW path must be EXCLUDED from `_purge_stale_entries`'s own
+            # input: that method deletes rows, and by the time it would
+            # run, the just-re-keyed row's `path` already equals the new
+            # path (so an unfiltered lookup would find and delete the
+            # very row `_rekey_renamed_files` just carefully preserved).
+            # Only genuinely modified files (never renamed) and deleted
+            # files need `_purge_stale_entries`'s delete-and-not-replace
+            # semantics.
+            self._rekey_renamed_files(repo_id, incremental_plan.renamed)
+            renamed_new_paths = {new for _, new in incremental_plan.renamed}
+            stale_paths = sorted(
+                (changed_set - renamed_new_paths) | set(incremental_plan.deleted_relpaths)
+            )
             self._purge_stale_entries(repo_id, stale_paths)
         elif incremental_plan.reason:
             logger.info("Full re-index for repo_id=%s: %s", repo_id, incremental_plan.reason)
@@ -736,6 +897,8 @@ class IndexingEngine:
             "incremental": incremental_plan.is_incremental,
             "incremental_reason": incremental_plan.reason,
             "deleted_files": list(incremental_plan.deleted_relpaths),
+            # Phase 3.2: {old, new} pairs re-keyed in place this run.
+            "renamed_files": [{"old": old, "new": new} for old, new in incremental_plan.renamed],
         }
 
     def _persist_to_db(

@@ -179,11 +179,12 @@ def test_detect_file_changes_with_no_changes_returns_empty_changeset(tmp_path):
     assert changes.total_changed == 0
 
 
-def test_detect_file_changes_a_rename_is_reported_as_delete_plus_add_not_a_rename(tmp_path):
-    """Phase 3.1's own explicit scope boundary: renames are NOT detected
-    as such (that is roadmap item 3.2, a distinct later milestone) --
-    `--no-renames` forces git to report a rename as a plain delete of
-    the old path and add of the new path."""
+def test_detect_file_changes_a_pure_rename_is_detected_as_a_rename(tmp_path):
+    """Phase 3.2: a file moved with NO content change is detected as an
+    actual rename (in `ChangeSet.renamed`), not delete+add. This inverts
+    Phase 3.1's own prior scope boundary (that milestone deliberately
+    used `--no-renames`) -- an expected, roadmap-driven behavior change,
+    not a regression."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     (repo / "old_name.py").write_text("def foo():\n    return 1\n", encoding="utf-8")
@@ -193,6 +194,82 @@ def test_detect_file_changes_a_rename_is_reported_as_delete_plus_add_not_a_renam
     _commit_all(repo, "rename")
 
     changes = detect_file_changes(str(repo), since_commit=sha1)
+    assert changes.renamed == [("old_name.py", "new_name.py")]
+    assert changes.deleted == []
+    assert changes.added == []
+    assert changes.modified == []
+    assert changes.changed_or_added == ["new_name.py"]
+    assert changes.total_changed == 1
+
+
+def test_detect_file_changes_a_rename_with_a_small_edit_is_still_detected_as_a_rename(tmp_path):
+    """A move plus a small content edit is still above git's own default
+    50% rename-similarity threshold, so it is still reported as a
+    rename, not delete+add."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "old_name.py").write_text(
+        "def foo():\n    return 1\n\n\ndef bar():\n    return 2\n", encoding="utf-8"
+    )
+    sha1 = _commit_all(repo, "initial")
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    (repo / "new_name.py").write_text(
+        "def foo():\n    return 100\n\n\ndef bar():\n    return 2\n", encoding="utf-8"
+    )
+    _commit_all(repo, "rename with edit")
+
+    changes = detect_file_changes(str(repo), since_commit=sha1)
+    assert changes.renamed == [("old_name.py", "new_name.py")]
+    assert changes.deleted == []
+    assert changes.added == []
+
+
+def test_detect_file_changes_a_move_below_gits_similarity_threshold_falls_back_to_delete_plus_add(tmp_path):
+    """A move where the new content is almost entirely different from
+    the old is below git's own default 50% rename-similarity threshold
+    -- git itself reports plain delete+add, and this module does not
+    override that judgment (matches the roadmap's own risk-register
+    mitigation: rely on git's own rename detection, not a custom
+    heuristic)."""
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "old_name.py").write_text("x = 1\n", encoding="utf-8")
+    sha1 = _commit_all(repo, "initial")
+
+    (repo / "old_name.py").unlink()
+    (repo / "new_name.py").write_text(
+        "class CompletelyDifferent:\n"
+        "    def method_one(self):\n        return 'a'\n\n"
+        "    def method_two(self):\n        return 'b'\n\n"
+        "    def method_three(self):\n        return 'c'\n",
+        encoding="utf-8",
+    )
+    _commit_all(repo, "unrelated swap")
+
+    changes = detect_file_changes(str(repo), since_commit=sha1)
+    assert changes.renamed == []
     assert changes.deleted == ["old_name.py"]
     assert changes.added == ["new_name.py"]
-    assert changes.modified == []
+
+
+def test_detect_file_changes_multiple_renames_together_with_other_changes(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    (repo / "b.py").write_text("def b():\n    return 2\n", encoding="utf-8")
+    (repo / "keep.py").write_text("def k():\n    return 3\n", encoding="utf-8")
+    sha1 = _commit_all(repo, "initial")
+
+    (repo / "a.py").rename(repo / "a_renamed.py")
+    (repo / "b.py").rename(repo / "b_renamed.py")
+    (repo / "new.py").write_text("def n():\n    return 4\n", encoding="utf-8")
+    _commit_all(repo, "two renames plus an add")
+
+    changes = detect_file_changes(str(repo), since_commit=sha1)
+    assert set(changes.renamed) == {("a.py", "a_renamed.py"), ("b.py", "b_renamed.py")}
+    assert changes.added == ["new.py"]
+    assert changes.deleted == []
+    assert "keep.py" not in (changes.added + changes.modified + changes.deleted)
+    assert set(changes.changed_or_added) == {"a_renamed.py", "b_renamed.py", "new.py"}
+    assert changes.total_changed == 3
