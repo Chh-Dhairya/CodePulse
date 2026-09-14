@@ -275,6 +275,59 @@ def test_remove_repo_on_never_indexed_repo_is_a_safe_no_op():
 
 
 # =============================================================================
+# Phase 3.1 -- BM25Index.remove_docs (new, finer-grained than remove_repo;
+# roadmap §37 item 3.1's own "(deleted)" category).
+# =============================================================================
+
+def test_remove_docs_removes_exactly_the_named_documents():
+    index = BM25Index()
+    index.add_symbol("keep1", _sym("keep_one", "a.py", "A symbol that stays."), repo_id=1)
+    index.add_symbol("remove_me", _sym("doomed", "b.py", "A symbol that gets removed."), repo_id=1)
+    index.add_symbol("keep2", _sym("keep_two", "c.py", "Another symbol that stays."), repo_id=1)
+    index.build()
+
+    index.remove_docs(["remove_me"])
+    index.build()
+
+    assert index.num_docs == 2
+    assert set(index.doc_ids) == {"keep1", "keep2"}
+    results = index.search("symbol", top_k=10)
+    assert "remove_me" not in [r["doc_id"] for r in results]
+
+
+def test_remove_docs_on_a_never_indexed_doc_id_is_a_safe_no_op():
+    index = BM25Index()
+    index.add_symbol("sym1", _sym("greet", "a.py", "hi there"), repo_id=1)
+    index.build()
+
+    index.remove_docs(["never_indexed"])
+    index.build()
+
+    assert index.num_docs == 1
+    assert index.doc_ids == ["sym1"]
+
+
+def test_remove_docs_empty_list_is_a_safe_no_op():
+    index = BM25Index()
+    index.add_symbol("sym1", _sym("greet", "a.py", "hi there"), repo_id=1)
+    index.build()
+    index.remove_docs([])
+    assert index.num_docs == 1
+
+
+def test_remove_docs_leaves_other_repositories_untouched():
+    index = BM25Index()
+    index.add_symbol("1::a.py::foo", _sym("foo", "a.py", "Repo one's symbol."), repo_id=1)
+    index.add_symbol("2::a.py::foo", _sym("foo", "a.py", "Repo two's symbol."), repo_id=2)
+    index.build()
+
+    index.remove_docs(["1::a.py::foo"])
+    index.build()
+
+    assert index.doc_ids == ["2::a.py::foo"]
+
+
+# =============================================================================
 # INTEGRATION TESTS -- repository-replacement idempotency through IndexingEngine
 # =============================================================================
 

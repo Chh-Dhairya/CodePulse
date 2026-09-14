@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -11,6 +12,7 @@ import numpy as np
 
 from codepulse.embeddings.chunker import CodeChunk, SemanticChunker
 from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableError
+from codepulse.git_diff import GitDiffError, detect_file_changes, get_head_commit_sha
 from codepulse.indexer.ignore import RepositoryIgnoreRules
 from codepulse.ingestion_safety import IngestionSafetyError
 from codepulse.models import FileParseResult, Symbol, compute_content_hash
@@ -24,11 +26,40 @@ from codepulse.storage.db import (
     EmbeddingModel,
     FileModel,
     RepositoryModel,
+    RepositorySnapshotModel,
     StorageManager,
     SymbolModel,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class IncrementalPlan:
+    """
+    Phase 3.1 -- the outcome of `IndexingEngine._plan_incremental_run`.
+
+    `is_incremental=False` means `index_directory()` must process every
+    discovered file exactly as it always has (this milestone's baseline,
+    unchanged, safety-net behavior) -- `changed_relpaths` is then
+    meaningless and always `None`. `is_incremental=True` means only the
+    files in `changed_relpaths` (added + modified; possibly an empty set
+    if nothing changed since the last indexed commit) need to be parsed,
+    and `deleted_relpaths` names files whose stale rows/index-entries
+    must be removed.
+
+    `reason` is a real, human-readable explanation of which of §9's own
+    "when a full re-index is still required" conditions applied (or,
+    for an incremental run, a short summary of what changed) -- surfaced
+    in `index_directory()`'s own return dict so a caller/test can see
+    *why* a given run took the path it did, rather than needing to
+    reverse-engineer it from side effects.
+    """
+
+    is_incremental: bool
+    changed_relpaths: set[str] | None
+    deleted_relpaths: list[str] = field(default_factory=list)
+    reason: str = ""
 
 # Files/folders to ignore during indexing
 IGNORE_DIRS = {
@@ -144,6 +175,215 @@ class IndexingEngine:
         finally:
             session.close()
 
+    def _plan_incremental_run(self, repo_path: str, repo_id: int) -> IncrementalPlan:
+        """
+        Phase 3.1 (roadmap §37 item 3.1; §9 Incremental Indexing Design's
+        own "when a full re-index is still required" list, checked here
+        in the same order §9 states it): decides whether
+        `index_directory()` can process only the files git says changed
+        since the last successful snapshot, or must fall back to
+        processing every discovered file exactly as it always has.
+
+        Every fallback condition below returns `is_incremental=False`
+        with a real, disclosed `reason` -- never a silent guess.
+
+        Also forces a full run whenever this engine instance has no
+        in-memory call graph cached yet for this `repo_id` (e.g. right
+        after a process restart, per `hydrate_repository`'s own existing,
+        documented contract that the call graph is not durable and
+        requires a fresh `index_directory()` call to restore). Without
+        this guard, an incremental run in a fresh process would silently
+        rebuild `self.call_graphs[repo_id]` from only the changed files
+        (this engine's `self.parse_results` cache used to keep the call
+        graph complete across incremental runs -- see `index_directory`'s
+        call-graph-building step -- is itself in-memory and lost on
+        restart), regressing call-graph completeness relative to every
+        pre-Phase-3.1 (always-full) run. This is disclosed, not silently
+        patched over: full call-graph completeness for incremental runs
+        is a best-effort, single-process-lifetime enhancement, not a
+        durable guarantee -- true incremental *graph* maintenance across
+        restarts is roadmap item 3.5 (local BFS incremental graph
+        update), explicitly out of this milestone's scope.
+        """
+        from codepulse.config import get_settings
+
+        settings = get_settings()
+        if not settings.incremental_indexing_enabled:
+            return IncrementalPlan(False, None, [], "incremental indexing disabled via config")
+
+        current_commit = get_head_commit_sha(repo_path)
+        if current_commit is None:
+            return IncrementalPlan(False, None, [], "not a git repository (or a git repository with no commits yet)")
+
+        session = self.storage.get_session()
+        try:
+            last_snapshot = (
+                session.query(RepositorySnapshotModel)
+                .filter(RepositorySnapshotModel.repo_id == repo_id)
+                .filter(RepositorySnapshotModel.commit_sha.isnot(None))
+                .order_by(RepositorySnapshotModel.id.desc())
+                .first()
+            )
+            repo_row = session.query(RepositoryModel).filter(RepositoryModel.id == repo_id).first()
+            prior_file_count = repo_row.file_count if repo_row is not None else 0
+        finally:
+            session.close()
+
+        if last_snapshot is None:
+            return IncrementalPlan(False, None, [], "no prior successful git-backed snapshot exists for this repository")
+
+        # Checked only once we know a real prior snapshot exists (a first
+        # run never reaches here) -- see this method's own docstring for
+        # why a cold `self.call_graphs` cache (e.g. after a process
+        # restart) must also force a full run.
+        if repo_id not in self.call_graphs:
+            return IncrementalPlan(
+                False, None, [],
+                "no in-memory call graph cached yet for this repository in this "
+                "process (e.g. after a restart) -- a full re-index is needed to "
+                "fully restore it",
+            )
+
+        if last_snapshot.embedding_model != self.embedder.model_name or last_snapshot.embedding_dim != self.embedder.dimension:
+            return IncrementalPlan(
+                False, None, [],
+                f"embedding model/dimension changed since the last snapshot "
+                f"({last_snapshot.embedding_model}/{last_snapshot.embedding_dim} -> "
+                f"{self.embedder.model_name}/{self.embedder.dimension})",
+            )
+
+        if last_snapshot.commit_sha == current_commit:
+            # Nothing changed at all -- still a real, valid incremental
+            # outcome (an empty changeset), not a failure or a reason to
+            # fall back to a full walk.
+            return IncrementalPlan(True, set(), [], f"no changes since the last indexed commit {current_commit[:8]}")
+
+        try:
+            changes = detect_file_changes(repo_path, since_commit=last_snapshot.commit_sha)
+        except GitDiffError as e:
+            return IncrementalPlan(False, None, [], f"git-diff change detection failed, falling back to a full re-index: {e}")
+
+        if prior_file_count > 0:
+            changed_fraction = changes.total_changed / prior_file_count
+            if changed_fraction > settings.incremental_max_changed_file_fraction:
+                return IncrementalPlan(
+                    False, None, [],
+                    f"{changes.total_changed} of {prior_file_count} previously-indexed files changed "
+                    f"({changed_fraction:.0%}), exceeding the {settings.incremental_max_changed_file_fraction:.0%} "
+                    f"incremental threshold -- a full re-index is cheaper",
+                )
+
+        return IncrementalPlan(
+            True,
+            set(changes.changed_or_added),
+            changes.deleted,
+            f"incremental run since commit {last_snapshot.commit_sha[:8]}: "
+            f"{len(changes.added)} added, {len(changes.modified)} modified, {len(changes.deleted)} deleted",
+        )
+
+    def _purge_stale_entries(self, repo_id: int, relpaths: list[str]) -> None:
+        """
+        Phase 3.1 -- removes the stale `File`/`Symbol` (cascading to
+        `Embedding`, per the existing schema's `ON DELETE CASCADE`) rows
+        for the given relpaths, plus their lexical (`BM25Index`) and
+        semantic (`VectorIndex`) index entries and this engine's
+        in-memory caches (`symbols_by_id`, `symbol_repo_map`,
+        `parse_results`) -- identified from the *durable* rows about to
+        be deleted (not from potentially-incomplete in-memory state), so
+        this is correct even if the file was indexed in a previous
+        process lifetime.
+
+        This serves TWO distinct Phase 3.1 purposes, both requiring the
+        exact same operation:
+
+          1. Permanently-deleted files (`IncrementalPlan.deleted_relpaths`)
+             -- called once, and nothing re-adds these rows/entries back.
+
+          2. Modified files (`IncrementalPlan.changed_relpaths`), called
+             BEFORE they are re-parsed -- a modified symbol's `doc_id` is
+             derived from `repo_id::file_path::symbol_name`, which is
+             stable across a content-only change, so without removing the
+             OLD entries first, re-adding the freshly re-parsed symbols
+             under the same doc_id strings would silently accumulate
+             duplicate lexical/vector entries. This is the same class of
+             problem Phase 2.1's `remove_repo` (whole-repo granularity)
+             and this milestone's own `remove_docs` (fine-grained) exist
+             to solve -- applied here specifically to the modified-file
+             case.
+
+        A relpath with no existing rows (a never-before-indexed path, the
+        common case for newly-*added* files) is a safe no-op, matching
+        `remove_repo`/`remove_docs`'s own no-op-safety precedent.
+        """
+        if not relpaths:
+            return
+
+        session = self.storage.get_session()
+        try:
+            file_rows = (
+                session.query(FileModel)
+                .filter(FileModel.repo_id == repo_id)
+                .filter(FileModel.path.in_(relpaths))
+                .all()
+            )
+            bm25_doc_ids: list[str] = []
+            vector_doc_ids: list[str] = []
+            for fm in file_rows:
+                symbol_rows = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
+                for sm in symbol_rows:
+                    bm25_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}")
+                    embedding_rows = (
+                        session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
+                    )
+                    for em in embedding_rows:
+                        vector_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}::{em.chunk_index}")
+
+            for fm in file_rows:
+                session.delete(fm)
+            session.commit()
+        finally:
+            session.close()
+
+        if bm25_doc_ids:
+            self.bm25_index.remove_docs(bm25_doc_ids)
+            self.bm25_index.build()
+        if vector_doc_ids:
+            self.vector_index.remove_docs(vector_doc_ids)
+        for doc_id in bm25_doc_ids:
+            self.symbols_by_id.pop(doc_id, None)
+            self.symbol_repo_map.pop(doc_id, None)
+        for relpath in relpaths:
+            self.parse_results.pop(f"{repo_id}::{relpath}", None)
+
+    def _record_snapshot(self, repo_id: int, repo_path: str) -> None:
+        """
+        Phase 3.1 -- records one `RepositorySnapshotModel` row for this
+        successful `index_directory()` run (full or incremental alike),
+        so the *next* call's `_plan_incremental_run` has a real prior
+        commit/embedding-configuration to compare against. Failure to
+        record a snapshot is logged, not raised -- a missing snapshot
+        row only ever causes the *next* run to safely fall back to a
+        full re-index (§9's own "no prior successful snapshot" case),
+        never data loss or a fabricated result for *this* run.
+        """
+        try:
+            commit_sha = get_head_commit_sha(repo_path)
+            session = self.storage.get_session()
+            try:
+                session.add(
+                    RepositorySnapshotModel(
+                        repo_id=repo_id,
+                        commit_sha=commit_sha,
+                        embedding_model=self.embedder.model_name,
+                        embedding_dim=self.embedder.dimension,
+                    )
+                )
+                session.commit()
+            finally:
+                session.close()
+        except Exception as e:
+            logger.warning("Failed to record repository snapshot for repo_id=%s: %s", repo_id, e)
+
     def index_directory(
         self,
         repo_path: str,
@@ -164,6 +404,14 @@ class IndexingEngine:
         # final DB persist step, which happens after these in-memory
         # structures are already populated).
         repo_id = self._resolve_repo_id(repo_name, resolved_repo_url)
+
+        # Phase 3.1: decide, before walking the directory, whether this
+        # run can be limited to git-diff-detected changed/added files
+        # (with deleted files cleaned up separately) or must process
+        # every discovered file exactly as every pre-Phase-3.1 run did.
+        # See `_plan_incremental_run`'s own docstring for the full
+        # decision logic (every §9 fallback condition, in order).
+        incremental_plan = self._plan_incremental_run(repo_path, repo_id)
 
         # Phase 0.8: load this repository's .gitignore/.codepulseignore
         # rules ONCE, before walking the tree, and reuse them for every
@@ -222,6 +470,39 @@ class IndexingEngine:
                 f"limit of {max_files}"
             )
 
+        # Phase 3.1: when incremental, restrict the (expensive) parse/
+        # chunk/embed loop below to just the files git-diff says were
+        # added or modified -- unchanged files are neither re-read nor
+        # re-parsed, which is the whole cost-saving point of §9. Deleted
+        # files are never in `all_files` to begin with (they no longer
+        # exist on disk to discover); together with modified files, they
+        # are handled by `_purge_stale_entries` immediately below (BEFORE
+        # the parse loop, specifically so a modified file's OLD doc_id
+        # entries are gone before its freshly re-parsed symbols are
+        # re-added under the same doc_id strings -- see
+        # `_purge_stale_entries`'s own docstring for why this ordering
+        # matters). A full run (`is_incremental=False`) leaves `all_files`
+        # untouched and skips this block entirely, exactly matching every
+        # pre-Phase-3.1 run's behavior.
+        if incremental_plan.is_incremental and incremental_plan.changed_relpaths is not None:
+            changed_set = incremental_plan.changed_relpaths
+            all_files = [
+                fp
+                for fp in all_files
+                if os.path.relpath(fp, repo_path).replace("\\", "/") in changed_set
+            ]
+            total_files = len(all_files)
+            logger.info(
+                "Incremental run for repo_id=%s: %s -- parsing %d changed/added file(s)",
+                repo_id,
+                incremental_plan.reason,
+                total_files,
+            )
+            stale_paths = sorted(changed_set | set(incremental_plan.deleted_relpaths))
+            self._purge_stale_entries(repo_id, stale_paths)
+        elif incremental_plan.reason:
+            logger.info("Full re-index for repo_id=%s: %s", repo_id, incremental_plan.reason)
+
         parsed_files: list[FileParseResult] = []
         all_symbols: list[Symbol] = []
         all_chunks: list[CodeChunk] = []
@@ -265,7 +546,12 @@ class IndexingEngine:
                     source_code = fh.read()
 
                 parse_res = parser.parse_file(rel_path, source_code)
-                self.parse_results[rel_path] = parse_res
+                # Phase 3.1: repo-qualified key (previously bare `rel_path`,
+                # which this dict's only prior use -- write-only, never
+                # read -- never exercised the cross-repo collision risk
+                # that a bare key would create once it became load-bearing
+                # for call-graph-completeness below).
+                self.parse_results[f"{repo_id}::{rel_path}"] = parse_res
                 parsed_files.append(parse_res)
 
                 for sym in parse_res.symbols:
@@ -291,7 +577,35 @@ class IndexingEngine:
         # repository's graph isn't discarded/overwritten by this run --
         # `call_graph` is kept in sync as a "most recently indexed" alias
         # for existing callers that are out of this milestone's scope.
-        repo_call_graph = CallGraphBuilder(parsed_files)
+        #
+        # Phase 3.1: on an incremental run, `parsed_files` above only
+        # covers this run's changed/added files -- building the call
+        # graph from that alone would silently regress completeness
+        # (edges from every unchanged file would vanish from
+        # `self.call_graphs[repo_id]`). To avoid that regression without
+        # doing roadmap item 3.5's job (local BFS incremental graph
+        # update, a genuinely different, deferred feature), merge in this
+        # engine instance's own cached `FileParseResult`s (populated by
+        # every parse, this run and prior ones, keyed by
+        # "{repo_id}::{rel_path}") for every currently-existing,
+        # unchanged file. `_plan_incremental_run`'s own
+        # "no in-memory call graph cached yet" guard is what keeps this
+        # safe after a process restart (that case always forces a full
+        # run instead, so this merge is never reached with a cold cache).
+        if incremental_plan.is_incremental:
+            cg_parsed_files = list(parsed_files)
+            seen_relpaths = {pf.file_path for pf in parsed_files}
+            prefix = f"{repo_id}::"
+            for key, cached in self.parse_results.items():
+                if not key.startswith(prefix):
+                    continue
+                cached_relpath = key[len(prefix):]
+                if cached_relpath in seen_relpaths or cached_relpath in incremental_plan.deleted_relpaths:
+                    continue
+                cg_parsed_files.append(cached)
+        else:
+            cg_parsed_files = parsed_files
+        repo_call_graph = CallGraphBuilder(cg_parsed_files)
         self.call_graphs[repo_id] = repo_call_graph
         self.call_graph = repo_call_graph
 
@@ -366,7 +680,19 @@ class IndexingEngine:
         # logic existed there at all); fixed here because Tantivy's
         # delete-by-term makes it essentially free, with zero impact on
         # the ranking contract.
-        self.bm25_index.remove_repo(repo_id)
+        #
+        # Phase 3.1: this whole-repo wipe is only correct for a FULL run,
+        # where `all_symbols` below is about to cover every symbol in the
+        # repository (so wipe-then-readd-everything is a correct
+        # replace). On an INCREMENTAL run, `all_symbols` only covers the
+        # changed/added subset -- calling `remove_repo` here would wipe
+        # every unchanged file's lexical documents too, with nothing in
+        # this run re-adding them back. `_purge_stale_entries` (called
+        # earlier, before the parse loop) already removed exactly the
+        # stale entries for modified/deleted files, so no whole-repo wipe
+        # is needed -- or correct -- for an incremental run.
+        if not incremental_plan.is_incremental:
+            self.bm25_index.remove_repo(repo_id)
         for sym in all_symbols:
             doc_id = f"{repo_id}::{sym.file_path}::{sym.name}"
             self.symbols_by_id[doc_id] = sym
@@ -385,6 +711,14 @@ class IndexingEngine:
             chunk_embeddings=chunk_embeddings,
         )
 
+        # Phase 3.1: record this run's snapshot (commit_sha + embedding
+        # config) AFTER successful persistence, whether this run was
+        # incremental or full -- so the *next* call's
+        # `_plan_incremental_run` has an up-to-date basis for comparison.
+        # See `_record_snapshot`'s own docstring for why a failure here
+        # is logged rather than raised.
+        self._record_snapshot(repo_id, repo_path)
+
         return {
             "repository_name": repo_name,
             "repository_id": repo_id,
@@ -396,6 +730,12 @@ class IndexingEngine:
             "embedding_error": embedding_error,
             "degraded_mode": embedding_error is not None,
             "database_stats": stats,
+            # Phase 3.1: discloses whether this run was incremental (and
+            # why), rather than requiring a caller to reverse-engineer it
+            # from `total_files` alone.
+            "incremental": incremental_plan.is_incremental,
+            "incremental_reason": incremental_plan.reason,
+            "deleted_files": list(incremental_plan.deleted_relpaths),
         }
 
     def _persist_to_db(
@@ -477,6 +817,8 @@ class IndexingEngine:
                 repo_record = RepositoryModel(
                     name=repo_name,
                     url=repo_url,
+                    # Placeholder -- overwritten below with a real DB count
+                    # once this run's File/Symbol upserts are flushed.
                     file_count=len(parsed_files),
                     symbol_count=len(all_symbols),
                     last_sync=now,
@@ -484,8 +826,6 @@ class IndexingEngine:
                 session.add(repo_record)
             else:
                 repo_record.name = repo_name
-                repo_record.file_count = len(parsed_files)
-                repo_record.symbol_count = len(all_symbols)
                 repo_record.last_sync = now
 
             session.flush()
@@ -595,6 +935,33 @@ class IndexingEngine:
                     unchanged_symbols += 1
 
             session.flush()
+
+            # Phase 3.1: `repo_record.file_count`/`symbol_count` must
+            # reflect the repository's TRUE total, not just this run's
+            # `len(parsed_files)`/`len(all_symbols)` -- those only equal
+            # the true total on a FULL run (where every file is always
+            # parsed). On an INCREMENTAL run, `parsed_files`/`all_symbols`
+            # cover only the changed/added subset, so using their lengths
+            # here would fabricate a shrunken file/symbol count -- a
+            # direct violation of the "no fabricated metrics" invariant,
+            # and it would also corrupt `_plan_incremental_run`'s own
+            # `prior_file_count` denominator (used for the >50%-changed
+            # fallback check) on every subsequent run. Querying the real,
+            # durable row counts is correct for a full run too (identical
+            # result, since every parseable file is always upserted into
+            # `FileModel`/`SymbolModel` on a full run) and is unaffected
+            # by whether `_purge_stale_entries` already ran earlier in
+            # `index_directory` (it always runs, and commits, before this
+            # method is ever called).
+            repo_record.file_count = (
+                session.query(FileModel).filter(FileModel.repo_id == repo_record.id).count()
+            )
+            repo_record.symbol_count = (
+                session.query(SymbolModel)
+                .join(FileModel, SymbolModel.file_id == FileModel.id)
+                .filter(FileModel.repo_id == repo_record.id)
+                .count()
+            )
 
             # --- Embedding upsert (natural key: (symbol_id, chunk_type, chunk_index)) ---
             new_embeddings = 0

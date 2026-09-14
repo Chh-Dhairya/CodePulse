@@ -263,6 +263,50 @@ class IndexJobModel(Base):
     repository = relationship("RepositoryModel")
 
 
+class RepositorySnapshotModel(Base):
+    """
+    Phase 3.1 (roadmap §37 item 3.1: "Git-diff change detection
+    (added/modified/deleted)"; §9 Incremental Indexing Design; §29 Data
+    Model, which explicitly names `RepositorySnapshot` as a required-now
+    entity: "Required for incremental indexing (§9) and crash-safe reads
+    (§17)"). Records, for one successful indexing run, the git commit
+    the repository's content was at (`commit_sha`, `None` for a
+    non-git/local-path repository -- git-diff-based change detection is
+    only possible for a real git repository) and the embedding model/
+    dimension used -- both are exactly the two pieces of state §9's own
+    "when a full re-index is still required" list needs to check on the
+    *next* run: "if no prior successful snapshot exists, [or] if the
+    embedding model version changed".
+
+    Like `IndexJobModel`, this is a run-history table (no natural-key
+    `UniqueConstraint`) -- one row per successful `index_directory()`
+    call, not an upsert-by-identity entity. `IndexingEngine._plan_
+    incremental_run` reads the single most recent row for a `repo_id` to
+    decide whether an incremental (git-diff-driven) run is possible; a
+    full re-index still creates its own new row here exactly the same
+    way, so "no prior successful snapshot" naturally self-heals after
+    the very first successful run.
+
+    This milestone does NOT implement §17's full crash-safe,
+    status-gated "always serve the latest ready snapshot" read semantics
+    -- that is a broader reliability feature §29 attributes to this same
+    entity for a *later* purpose, not something Phase 3.1's own literal
+    "git-diff change detection" scope requires building now. No `status`
+    column exists here for that reason; disclosed, not silently
+    expanded into.
+    """
+    __tablename__ = "repository_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True)
+    commit_sha = Column(String(64), nullable=True)
+    embedding_model = Column(String(255), nullable=True)
+    embedding_dim = Column(Integer, nullable=True)
+    indexed_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    repository = relationship("RepositoryModel")
+
+
 class StorageManager:
     """Manages database connection, tables, and session lifecycle."""
 

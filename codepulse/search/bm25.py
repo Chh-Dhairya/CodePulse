@@ -240,6 +240,30 @@ class BM25Index:
         if removed:
             self.doc_ids = [d for d in self.doc_ids if d not in removed]
 
+    def remove_docs(self, doc_ids: list[str]) -> None:
+        """
+        Phase 3.1 (roadmap §37 item 3.1: git-diff change detection's
+        "(deleted)" category) -- deletes exactly the given documents by
+        their exact `doc_id` (the `doc_id` field is `tokenizer_name="raw"`,
+        so this is an exact-term match, never a partial/fuzzy one), unlike
+        `remove_repo`'s coarser whole-repository granularity. Used when
+        `IndexingEngine.index_directory()` detects a specific set of
+        deleted files via `codepulse.git_diff` and needs to remove only
+        those files' symbols from the lexical index, leaving every other
+        symbol in the same repository (and every other repository)
+        untouched. Safe to call with a `doc_id` that is not currently
+        indexed (a harmless no-op for that one id, matching
+        `remove_repo`'s existing no-op-safety precedent).
+        """
+        to_remove = set(doc_ids)
+        if not to_remove:
+            return
+        for doc_id in to_remove:
+            self._writer.delete_documents("doc_id", doc_id)
+        for doc_id in to_remove:
+            self._repo_by_doc_id.pop(doc_id, None)
+        self.doc_ids = [d for d in self.doc_ids if d not in to_remove]
+
     def build(self) -> None:
         """
         Commits every `add_document`/`remove_repo` call made since the

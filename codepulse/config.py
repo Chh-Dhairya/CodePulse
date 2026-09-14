@@ -174,6 +174,34 @@ class CodePulseConfig(BaseModel):
         ),
     )
 
+    # Incremental Indexing (Phase 3.1)
+    incremental_indexing_enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether IndexingEngine.index_directory() attempts git-diff-based "
+            "incremental change detection (roadmap §37 item 3.1) before "
+            "falling back to a full re-index. Every §9 fallback condition "
+            "(not a git repo, no prior snapshot, embedding model changed, "
+            "too large a fraction of files changed) still applies even when "
+            "this is True; setting it False unconditionally forces a full "
+            "re-index every time, matching this project's pre-Phase-3.1 "
+            "behavior exactly."
+        ),
+    )
+    incremental_max_changed_file_fraction: float = Field(
+        default=0.5,
+        description=(
+            "If more than this fraction of a repository's previously-"
+            "indexed files changed since the last snapshot, a full "
+            "re-index is used instead of an incremental one (roadmap §9: "
+            "'more than some threshold (e.g., 50%) of files changed at "
+            "once (rebase, mass reformat) -- in which case a full "
+            "re-index is actually cheaper than incremental bookkeeping'). "
+            "0.5 is the roadmap's own literal example figure, not an "
+            "independently benchmarked one."
+        ),
+    )
+
     model_config = {
         "extra": "ignore",
     }
@@ -299,6 +327,8 @@ _ENV_VAR_MAPPINGS: dict[str, str] = {
     "CODEPULSE_INGESTION_ALLOWED_ROOTS": "ingestion_allowed_roots",
     "CODEPULSE_INGESTION_MAX_FILES_PER_REPO": "ingestion_max_files_per_repo",
     "CODEPULSE_INGESTION_MAX_FILE_SIZE_BYTES": "ingestion_max_file_size_bytes",
+    "CODEPULSE_INCREMENTAL_INDEXING_ENABLED": "incremental_indexing_enabled",
+    "CODEPULSE_INCREMENTAL_MAX_CHANGED_FILE_FRACTION": "incremental_max_changed_file_fraction",
 }
 
 

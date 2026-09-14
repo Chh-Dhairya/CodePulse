@@ -291,6 +291,81 @@ def test_known_limitation_repeated_add_of_the_same_doc_id_accumulates_duplicates
 
 
 # =============================================================================
+# Phase 3.1 -- VectorIndex.remove_docs (new capability, needed for
+# git-diff-driven deletion handling; roadmap §37 item 3.1's own
+# "(deleted)" category).
+# =============================================================================
+
+def test_remove_docs_removes_exactly_the_named_documents():
+    index = VectorIndex(dimension=4)
+    index.add("doc1", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    index.add("doc2", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32))
+    index.add("doc3", np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32))
+
+    index.remove_docs(["doc2"])
+
+    assert index.doc_ids == ["doc1", "doc3"]
+    assert index.vectors.shape == (2, 4)
+    results = index.search(np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), top_k=10)
+    assert {r["doc_id"] for r in results} == {"doc1", "doc3"}
+
+
+def test_remove_docs_on_an_unknown_doc_id_is_a_safe_no_op():
+    index = VectorIndex(dimension=4)
+    index.add("doc1", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+
+    index.remove_docs(["never_indexed"])
+
+    assert index.doc_ids == ["doc1"]
+    assert index.vectors.shape == (1, 4)
+
+
+def test_remove_docs_empty_list_is_a_safe_no_op():
+    index = VectorIndex(dimension=4)
+    index.add("doc1", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    index.remove_docs([])
+    assert index.doc_ids == ["doc1"]
+
+
+def test_remove_docs_then_add_again_does_not_collide_with_a_freed_rowid():
+    """
+    The exact scenario Phase 3.1's `_next_rowid` monotonic counter exists
+    to protect against: delete a document, add a new one, and confirm
+    the new one is genuinely distinct from (not silently merged with) any
+    stale internal state the deleted document's old rowid might have left
+    behind.
+    """
+    index = VectorIndex(dimension=4)
+    index.add("doc1", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), {"v": "old"})
+    index.remove_docs(["doc1"])
+    index.add("doc1", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), {"v": "new"})
+
+    assert index.doc_ids == ["doc1"]
+    results = index.search(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), top_k=10)
+    assert len(results) == 1
+    assert results[0]["doc_id"] == "doc1"
+    assert results[0]["metadata"] == {"v": "new"}
+    assert round(results[0]["similarity"], 4) == 1.0
+
+
+def test_remove_docs_preserves_metadata_and_vectors_alignment_for_remaining_docs():
+    index = VectorIndex(dimension=4)
+    index.add("doc1", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), {"n": 1})
+    index.add("doc2", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), {"n": 2})
+    index.add("doc3", np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32), {"n": 3})
+
+    index.remove_docs(["doc1"])
+
+    assert index.doc_ids == ["doc2", "doc3"]
+    assert index.metadata == [{"n": 2}, {"n": 3}]
+    assert index.vectors.shape == (2, 4)
+    # doc2's row must still be the one closest to its own original vector.
+    results = index.search(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), top_k=1)
+    assert results[0]["doc_id"] == "doc2"
+    assert results[0]["metadata"] == {"n": 2}
+
+
+# =============================================================================
 # FAILURE PROPAGATION -- a sqlite-vec-layer failure surfaces through the
 # existing Phase 1.6 structured error architecture, not a hand-rolled shape.
 # =============================================================================

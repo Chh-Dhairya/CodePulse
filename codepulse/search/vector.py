@@ -23,9 +23,10 @@ class VectorIndex:
 
     - Constructor: `VectorIndex(dimension=384)`.
     - `.dimension`: unchanged.
-    - `.doc_ids`: a real `list[str]`, append-only (this milestone does not
-      add a repository-replacement/delete capability -- see the module's
-      own "Known limitation" note below).
+    - `.doc_ids`: a real `list[str]`, reflecting the currently-active
+      document set (Phase 3.1 added `remove_docs`, below, so this is no
+      longer purely append-only -- see the module's own "Known
+      limitation" note for exactly what is, and is not, covered by it).
     - `.vectors`: a genuine `numpy.ndarray` of shape `(num_docs,
       dimension)`, mirroring every normalized vector ever added, in
       insertion order -- `tests/test_embedding_persistence.py` asserts
@@ -68,20 +69,29 @@ class VectorIndex:
     CLAUDE.md §4), which an approximate structure would not guarantee as
     simply.
 
-    Known limitation, deliberately NOT addressed in this milestone
+    Known limitation, UPDATED by Phase 3.1, not fully resolved by it
     (disclosed, not silently expanded scope -- see CODEPULSE_PROGRESS.md):
-    unlike Phase 2.1's `BM25Index.remove_repo`, this adapter does not
-    implement repository-replacement (delete-by-`repo_id`-then-add)
-    idempotency. The pre-Phase-2.2 `VectorIndex` never had this either --
-    `add`/`add_batch` were, and remain, pure-append operations, so
-    re-indexing an already-indexed repository was already silently
-    accumulating duplicate vector entries before this milestone. This
-    parity gap (lexical re-indexing is now idempotent per Phase 2.1;
-    semantic re-indexing is not) is a genuine, real, pre-existing
-    characteristic this milestone's literal scope ("adapter... behind
-    existing `VectorIndex` call sites") does not require fixing -- CLAUDE.md
-    §12 governs this: recorded here and in CODEPULSE_PROGRESS.md rather
-    than opportunistically expanded into this milestone.
+    Phase 2.2 shipped with `add`/`add_batch` as pure-append operations
+    and no delete capability at all, unlike Phase 2.1's
+    `BM25Index.remove_repo` -- meaning re-indexing an already-indexed
+    repository silently accumulated duplicate vector entries. Phase 3.1
+    adds a real, general `remove_docs(doc_ids)` method (needed for its
+    own literal "(deleted)" file-handling requirement), which
+    `IndexingEngine.index_directory()`'s new incremental path now also
+    uses to remove the OLD embeddings of a file whose content changed
+    before re-adding the new ones -- closing the practical duplication
+    gap for that specific, incremental-reindex case. It does **not**
+    add a `remove_repo`-style "delete everything for this repo_id in
+    one call" convenience, and a caller who adds the exact same
+    `doc_id` twice WITHOUT first calling `remove_docs` still gets a
+    duplicate (no automatic dedup-on-add exists, by design -- see
+    `remove_docs`'s own docstring). A **full**, non-incremental re-index
+    of an already-indexed repository (the same scenario Phase 2.1's
+    `remove_repo` handles for the lexical index) still accumulates
+    vector duplicates exactly as before -- this specific gap remains
+    open, tracked in `CODEPULSE_PROGRESS.md`, not addressed by this
+    milestone (Phase 3.1's own scope is git-diff-driven incremental
+    indexing specifically, not full-reindex idempotency for `VectorIndex`).
 
     Thread-safety note (a necessary, disclosed adjustment, not a design
     preference): the underlying `sqlite3.Connection` is constructed with
@@ -114,6 +124,22 @@ class VectorIndex:
             f"embedding float[{dimension}] distance_metric=cosine)"
         )
 
+        # Phase 3.1 (roadmap §37 item 3.1's "(deleted)" category needs a
+        # real delete capability on this index, which did not exist
+        # before this milestone -- see `remove_docs` below). A rowid is
+        # no longer derivable from list position (`rowid - 1 ==
+        # list-index`), since a deletion in the middle of `self.doc_ids`
+        # would break that correspondence for every entry after it.
+        # `_next_rowid` is a monotonic counter, NEVER decremented or
+        # reused, so a rowid freed by a delete can never collide with a
+        # rowid assigned to a still-live document later. `_rowid_by_doc_id`/
+        # `_doc_by_rowid` are the explicit, authoritative mappings
+        # `search()` and `remove_docs()` use instead of positional
+        # arithmetic.
+        self._next_rowid: int = 1
+        self._rowid_by_doc_id: dict[str, int] = {}
+        self._doc_by_rowid: dict[int, tuple[str, dict[str, Any]]] = {}
+
     def add(self, doc_id: str, vector: np.ndarray, metadata: dict[str, Any] | None = None) -> None:
         """Adds a single normalized vector with doc_id and metadata."""
         vec_2d = vector.reshape(1, -1) if vector.ndim == 1 else vector
@@ -139,26 +165,74 @@ class VectorIndex:
         else:
             self.vectors = np.vstack([self.vectors, normalized_vecs])
 
+        resolved_metas = list(metadatas) if metadatas else [{} for _ in doc_ids]
+
         # `vec_items`'s rowid is the ONLY handle sqlite-vec's own KNN query
-        # gives back (Section: verified via direct experiment) -- it is not
-        # the CodePulse `doc_id` string. Rowids are assigned 1-based, in the
-        # exact same append order `self.doc_ids` grows in, and (since this
-        # adapter never deletes a row -- see class docstring's "Known
-        # limitation") rowid N always corresponds to `self.doc_ids[N - 1]` /
-        # `self.metadata[N - 1]` for the lifetime of this instance.
-        start_rowid = len(self.doc_ids) + 1
-        rows = [
-            (start_rowid + i, sqlite_vec.serialize_float32(normalized_vecs[i].tolist()))
-            for i in range(len(doc_ids))
-        ]
+        # gives back (verified via direct experiment) -- it is not the
+        # CodePulse `doc_id` string. Each new rowid comes from the
+        # monotonic `_next_rowid` counter (Phase 3.1 -- see `__init__`'s
+        # comment on why this replaced the old "rowid - 1 == list index"
+        # arithmetic once deletion became possible).
+        rows = []
+        for i, doc_id in enumerate(doc_ids):
+            rowid = self._next_rowid
+            self._next_rowid += 1
+            rows.append((rowid, sqlite_vec.serialize_float32(normalized_vecs[i].tolist())))
+            self._rowid_by_doc_id[doc_id] = rowid
+            self._doc_by_rowid[rowid] = (doc_id, resolved_metas[i])
+
         self._conn.executemany("INSERT INTO vec_items(rowid, embedding) VALUES (?, ?)", rows)
         self._conn.commit()
 
         self.doc_ids.extend(doc_ids)
-        if metadatas:
-            self.metadata.extend(metadatas)
-        else:
-            self.metadata.extend([{} for _ in doc_ids])
+        self.metadata.extend(resolved_metas)
+
+    def remove_docs(self, doc_ids: list[str]) -> None:
+        """
+        Phase 3.1 (roadmap §37 item 3.1: git-diff change detection's
+        "(deleted)" category) -- deletes exactly the given documents by
+        their real `doc_id`. This is a genuinely new capability: no
+        version of `VectorIndex` before this milestone could delete
+        anything (see the class docstring's "Known limitation," which
+        this method does not fully resolve -- see below). Used when
+        `IndexingEngine.index_directory()` detects a specific set of
+        deleted files via `codepulse.git_diff` and needs to remove only
+        those files' embeddings, leaving every other document (in this
+        repository or any other) untouched. Safe to call with a `doc_id`
+        that is not currently indexed (a no-op for that one id).
+
+        Deliberately does NOT resolve Phase 2.2's disclosed
+        repository-replacement-idempotency gap on its own: this method
+        only removes documents a caller explicitly names (e.g. from a
+        git-diff deleted-files list); it is not a `remove_repo`-style
+        "delete everything for this repo_id" operation, and
+        `add`/`add_batch` still perform no automatic dedup on their own.
+        `IndexingEngine.index_directory()`'s Phase 3.1 incremental path
+        (see its own docstring) is what actually closes the practical
+        gap for the specific case of a file being re-indexed after a
+        real content change, by computing and passing the old doc_ids
+        for changed files into this method before re-adding them.
+        """
+        to_remove = set(doc_ids)
+        if not to_remove:
+            return
+
+        rowids_to_remove = [self._rowid_by_doc_id[d] for d in to_remove if d in self._rowid_by_doc_id]
+        if rowids_to_remove:
+            placeholders = ",".join("?" for _ in rowids_to_remove)
+            self._conn.execute(f"DELETE FROM vec_items WHERE rowid IN ({placeholders})", rowids_to_remove)
+            self._conn.commit()
+
+        for doc_id in to_remove:
+            rowid = self._rowid_by_doc_id.pop(doc_id, None)
+            if rowid is not None:
+                self._doc_by_rowid.pop(rowid, None)
+
+        keep_mask = [doc_id not in to_remove for doc_id in self.doc_ids]
+        self.doc_ids = [d for d, keep in zip(self.doc_ids, keep_mask) if keep]
+        self.metadata = [m for m, keep in zip(self.metadata, keep_mask) if keep]
+        if self.vectors.shape[0]:
+            self.vectors = self.vectors[np.array(keep_mask, dtype=bool)]
 
     def search(self, query_vector: np.ndarray, top_k: int = 20) -> list[dict[str, Any]]:
         """
@@ -217,7 +291,11 @@ class VectorIndex:
 
         results = []
         for rowid, distance in rows:
-            idx = rowid - 1
+            # Phase 3.1: looked up via the explicit `_doc_by_rowid`
+            # mapping (see `__init__`'s comment) rather than the old
+            # `rowid - 1 == list index` arithmetic, which stopped being
+            # valid the moment deletion (`remove_docs`) became possible.
+            doc_id, doc_metadata = self._doc_by_rowid[rowid]
             # sqlite-vec's own cosine `distance` is `1 - cosine_similarity`
             # (verified experimentally) -- recovered here and then run
             # through the EXACT same similarity/relevance/distance formulas
@@ -238,11 +316,11 @@ class VectorIndex:
             relevance = max(0.0, min(1.0, (sim + 1.0) / 2.0))
 
             results.append({
-                "doc_id": self.doc_ids[idx],
+                "doc_id": doc_id,
                 "similarity": sim,
                 "relevance_score": relevance,
                 "embedding_distance": distance_val,
-                "metadata": self.metadata[idx],
+                "metadata": doc_metadata,
             })
 
         return results
