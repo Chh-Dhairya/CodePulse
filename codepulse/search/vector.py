@@ -175,7 +175,37 @@ class VectorIndex:
         if q_norm > 0:
             q = q / q_norm
 
-        num_results = min(top_k, len(self.doc_ids))
+        # Phase 2.5 finding (discovered by the benchmark harness's own
+        # 10K-file tier run, not previously exercised by any Phase 2.2
+        # test -- those all used small corpora): sqlite-vec's `vec0` KNN
+        # query has a hard limit on `k`, enforced by the library itself
+        # (verified experimentally: `sqlite3.OperationalError: k value in
+        # knn query too large, provided 40000 and the limit is 4096`).
+        # `IndexingEngine.search()`'s repository-scoped candidate-pool
+        # sizing (Phase 0.6) intentionally requests `top_k =
+        # len(vector_index.doc_ids)` -- the entire corpus -- so
+        # `_repo_filter`'s post-filtering is never starved; at realistic
+        # scale that number now regularly exceeds sqlite-vec's own limit,
+        # which would otherwise crash every scoped semantic/hybrid search
+        # once a repository's embedded-chunk count passes ~4096. Clamped
+        # here, defensively, for every caller (not just the benchmark's
+        # own scoped-search path) -- this is the smallest number of
+        # candidates sqlite-vec itself will ever accept in one query, so
+        # any caller requesting more must be capped somewhere, and this is
+        # the one place that already owns the actual SQL call.
+        #
+        # Disclosed trade-off, not silently glossed over: capping means a
+        # very large multi-repository deployment (a query result set
+        # genuinely dominated by >4096 higher-scoring OTHER repositories'
+        # chunks before this repository's own best candidates appear) could
+        # in principle see `_repo_filter` starved below `limit` results for
+        # that one repository -- the same class of approximation the
+        # existing "pull the whole corpus" heuristic already was, not a new
+        # kind of incompleteness, and unreachable within this milestone's
+        # own single-repository-per-tier benchmark. Revisit only if this is
+        # ever observed to actually matter for a real multi-tenant corpus.
+        SQLITE_VEC_MAX_K = 4096
+        num_results = min(top_k, len(self.doc_ids), SQLITE_VEC_MAX_K)
         if num_results <= 0:
             return []
 

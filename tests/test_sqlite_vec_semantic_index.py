@@ -164,6 +164,39 @@ def test_top_k_truncates_result_count():
     assert [r["doc_id"] for r in limited] == [r["doc_id"] for r in all_results[:3]]
 
 
+def test_top_k_beyond_sqlite_vec_own_hard_limit_does_not_crash():
+    """
+    Phase 2.5 regression: discovered by the benchmark harness's own
+    ~10K-file tier run -- `IndexingEngine.search()`'s repository-scoped
+    candidate-pool sizing (Phase 0.6) can legitimately request `top_k`
+    equal to the entire corpus, which at realistic scale exceeds
+    sqlite-vec's own hard `k` limit (verified experimentally to be 4096
+    at the installed 0.1.9 version) and used to raise
+    `sqlite3.OperationalError` instead of returning results. A `top_k`
+    larger than both the corpus size AND sqlite-vec's own limit must
+    still return a real, correctly-ordered, non-crashing result set,
+    capped at whichever of the three (top_k, corpus size, sqlite-vec's
+    limit) is smallest.
+    """
+    index = VectorIndex(dimension=4)
+    # A corpus deliberately larger than sqlite-vec's real 4096 limit --
+    # small vectors, so this stays fast (no real embedding cost).
+    rng = np.random.default_rng(0)
+    n = 4200
+    vectors = rng.random((n, 4)).astype(np.float32)
+    doc_ids = [f"doc{i}" for i in range(n)]
+    index.add_batch(doc_ids, vectors)
+
+    # Before the fix, this exact call (top_k > 4096, corpus > 4096) raised
+    # sqlite3.OperationalError: "k value in knn query too large".
+    results = index.search(vectors[0], top_k=n)
+
+    assert len(results) <= 4096, "must never exceed sqlite-vec's own real k limit"
+    assert len(results) > 0
+    assert results[0]["doc_id"] == "doc0"  # exact self-match still ranks first
+    assert round(results[0]["similarity"], 4) == 1.0
+
+
 def test_vectors_attribute_reflects_real_shape():
     index = VectorIndex(dimension=4)
     assert index.vectors.shape == (0, 4)

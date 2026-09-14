@@ -1,0 +1,41 @@
+[
+  {
+    "tier_name": "small (~1K files)",
+    "num_files": 1000,
+    "num_symbols": 2000,
+    "index_time_seconds": 70.426,
+    "search_type": "hybrid",
+    "search_p50_ms": 76.79,
+    "search_p95_ms": 236.99,
+    "search_min_ms": 68.85,
+    "search_max_ms": 253.09,
+    "num_latency_samples": 90,
+    "notes": "fixture generation took 0.4s (not included in index_time_seconds)"
+  },
+  {
+    "tier_name": "medium (~10K files)",
+    "num_files": 10000,
+    "num_symbols": 20000,
+    "index_time_seconds": 447.916,
+    "search_type": "hybrid",
+    "search_p50_ms": 315.33,
+    "search_p95_ms": 704.22,
+    "search_min_ms": 268.48,
+    "search_max_ms": 1020.36,
+    "num_latency_samples": 90,
+    "notes": "fixture generation took 10.5s (not included in index_time_seconds)"
+  },
+  {
+    "tier_name": "large (reduced from roadmap's ~100K+)",
+    "num_files": 25000,
+    "num_symbols": 50000,
+    "index_time_seconds": 845.968,
+    "search_type": "hybrid",
+    "search_p50_ms": 311.15,
+    "search_p95_ms": 1080.49,
+    "search_min_ms": 283.57,
+    "search_max_ms": 2271.65,
+    "num_latency_samples": 90,
+    "notes": "fixture generation took 26.7s (not included in index_time_seconds)"
+  }
+]
