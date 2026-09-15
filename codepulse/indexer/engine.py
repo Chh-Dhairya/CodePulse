@@ -500,6 +500,137 @@ class IndexingEngine:
                 self.symbol_repo_map.pop(doc_id, None)
             self.parse_results.pop(f"{repo_id}::{old_path}", None)
 
+    def _diff_and_purge_file_symbols(
+        self, repo_id: int, rel_path: str, new_symbols: list[Symbol]
+    ) -> set[int]:
+        """
+        Phase 3.3 (roadmap §37 item 3.3: "Symbol-level body_hash
+        comparison to skip unchanged embeddings"; §9: "within a changed
+        file, compare `body_hash` per extracted symbol against the
+        previous snapshot's symbols... Unchanged symbols skip
+        re-embedding and re-chunking entirely -- this is the single
+        biggest cost saver on incremental runs").
+
+        Compares `new_symbols` (this run's freshly parsed symbols for
+        `rel_path`) against the EXISTING, durable `SymbolModel` rows for
+        that same file (if any), and:
+
+          1. Returns `{id(sym) for sym in new_symbols if unchanged}` --
+             Python object identity is a safe, cheap key here because
+             `new_symbols` is a single parse pass's freshly constructed
+             list, used only within the same `index_directory()` call
+             that produced it.
+          2. For every existing row that DISAPPEARED entirely (no
+             matching new symbol at all -- deleted, or renamed to a
+             different name WITHIN the file) -- deletes its
+             `SymbolModel` row (cascading to `Embedding`, per the
+             existing schema) and purges its lexical/vector doc_ids.
+             This closes a real, previously-open, previously-disclosed
+             gap as a necessary side effect of building this comparison
+             at all (`_persist_to_db`'s own docstring: "this mirrors
+             Phase 0.4's decision not to delete stale Symbol rows...
+             real stale-data cleanup is Phase 3").
+          3. For every symbol that MATCHED an existing row but has a
+             DIFFERENT `body_hash` -- purges its lexical/vector doc_ids
+             (it will be re-chunked/re-embedded and re-added by the
+             normal pipeline immediately after this call returns,
+             under the same doc_id string).
+          4. For every symbol that matched AND has the SAME `body_hash`
+             -- does nothing at all: its doc_id is deliberately left
+             untouched (not purged, not scheduled for re-add), since
+             its existing lexical/vector entries and DB rows are
+             already correct.
+
+        Matching key -- a deliberate, disclosed scope choice (mirroring
+        the Phase 3.2 precedent, see CODEPULSE_PROGRESS.md): `(name,
+        start_line)` plus a `type` equality check -- the EXACT SAME
+        natural key `_persist_to_db`'s own Symbol upsert already uses,
+        NOT a broader `(name, type)`-only key. §9's own text describes
+        matching by "(name, type) first, falling back to signature
+        similarity if the name changed" -- a fuller, start_line-
+        independent matcher (needed to correctly recognize an unchanged
+        symbol whose `start_line` merely shifted because unrelated code
+        above it in the file changed) is deliberately NOT built here.
+        Using the SAME key `_persist_to_db` uses guarantees the two can
+        never disagree about which row is "the same symbol": a symbol
+        whose `start_line` shifts simply isn't eligible for this
+        optimization and falls through to a full re-chunk/re-embed with
+        a fresh id -- exactly today's pre-existing (Phase 0.4) behavior
+        for that case, not a regression. Building the fuller matcher is
+        a disclosed, deferred enhancement, not silently done.
+
+        Deliberately NOT called for a file that was renamed this run
+        (see `index_directory`'s own caller) -- a rename changes every
+        one of its symbols' doc_id strings (which embed the file path)
+        regardless of body content, so "leave unchanged symbols' doc_ids
+        alone" does not apply there; `_rekey_renamed_files` already
+        handles that case's own (whole-file) doc_id purge correctly.
+        """
+        unchanged_ids: set[int] = set()
+        bm25_doc_ids_to_purge: list[str] = []
+        vector_doc_ids_to_purge: list[str] = []
+
+        session = self.storage.get_session()
+        try:
+            fm = (
+                session.query(FileModel)
+                .filter(FileModel.repo_id == repo_id)
+                .filter(FileModel.path == rel_path)
+                .first()
+            )
+            if fm is None:
+                return unchanged_ids  # brand new file -- nothing to compare against
+
+            existing_by_key: dict[tuple[str, int], SymbolModel] = {
+                (sm.name, sm.start_line): sm
+                for sm in session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
+            }
+            matched_existing_ids: set[int] = set()
+
+            for sym in new_symbols:
+                sym_type_value = sym.type.value if hasattr(sym.type, "value") else str(sym.type)
+                existing_sm = existing_by_key.get((sym.name, sym.start_line))
+                if existing_sm is None or existing_sm.type != sym_type_value:
+                    continue  # a genuinely new symbol -- nothing to purge, nothing to skip
+                matched_existing_ids.add(existing_sm.id)
+                if existing_sm.body_hash == sym.body_hash:
+                    unchanged_ids.add(id(sym))
+                else:
+                    bm25_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sym.name}")
+                    embedding_rows = (
+                        session.query(EmbeddingModel)
+                        .filter(EmbeddingModel.symbol_id == existing_sm.id)
+                        .all()
+                    )
+                    for em in embedding_rows:
+                        vector_doc_ids_to_purge.append(
+                            f"{repo_id}::{rel_path}::{sym.name}::{em.chunk_index}"
+                        )
+
+            disappeared = [sm for sm in existing_by_key.values() if sm.id not in matched_existing_ids]
+            for sm in disappeared:
+                bm25_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sm.name}")
+                embedding_rows = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
+                for em in embedding_rows:
+                    vector_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sm.name}::{em.chunk_index}")
+                session.delete(sm)
+
+            if disappeared:
+                session.commit()
+        finally:
+            session.close()
+
+        if bm25_doc_ids_to_purge:
+            self.bm25_index.remove_docs(bm25_doc_ids_to_purge)
+            self.bm25_index.build()
+        if vector_doc_ids_to_purge:
+            self.vector_index.remove_docs(vector_doc_ids_to_purge)
+        for doc_id in bm25_doc_ids_to_purge:
+            self.symbols_by_id.pop(doc_id, None)
+            self.symbol_repo_map.pop(doc_id, None)
+
+        return unchanged_ids
+
     def _record_snapshot(self, repo_id: int, repo_path: str) -> None:
         """
         Phase 3.1 -- records one `RepositorySnapshotModel` row for this
@@ -619,17 +750,10 @@ class IndexingEngine:
         # chunk/embed loop below to just the files git-diff says were
         # added, modified, or renamed/moved (a rename's NEW path) --
         # unchanged files are neither re-read nor re-parsed, which is the
-        # whole cost-saving point of §9. Deleted files are never in
-        # `all_files` to begin with (they no longer exist on disk to
-        # discover); together with modified files, they are handled by
-        # `_purge_stale_entries` immediately below (BEFORE the parse
-        # loop, specifically so a modified file's OLD doc_id entries are
-        # gone before its freshly re-parsed symbols are re-added under
-        # the same doc_id strings -- see `_purge_stale_entries`'s own
-        # docstring for why this ordering matters). A full run
-        # (`is_incremental=False`) leaves `all_files` untouched and skips
-        # this block entirely, exactly matching every pre-Phase-3.1 run's
-        # behavior.
+        # whole cost-saving point of §9. A full run (`is_incremental=
+        # False`) leaves `all_files` untouched and skips this block
+        # entirely, exactly matching every pre-Phase-3.1 run's behavior.
+        renamed_new_paths: set[str] = set()
         if incremental_plan.is_incremental and incremental_plan.changed_relpaths is not None:
             changed_set = incremental_plan.changed_relpaths
             all_files = [
@@ -645,21 +769,23 @@ class IndexingEngine:
                 total_files,
             )
             # Phase 3.2: re-key renamed files' EXISTING File/Symbol/
-            # Embedding rows to their new path FIRST -- this must happen
-            # BEFORE `_purge_stale_entries` below, and a renamed file's
-            # NEW path must be EXCLUDED from `_purge_stale_entries`'s own
-            # input: that method deletes rows, and by the time it would
-            # run, the just-re-keyed row's `path` already equals the new
-            # path (so an unfiltered lookup would find and delete the
-            # very row `_rekey_renamed_files` just carefully preserved).
-            # Only genuinely modified files (never renamed) and deleted
-            # files need `_purge_stale_entries`'s delete-and-not-replace
-            # semantics.
+            # Embedding rows to their new path FIRST.
             self._rekey_renamed_files(repo_id, incremental_plan.renamed)
             renamed_new_paths = {new for _, new in incremental_plan.renamed}
-            stale_paths = sorted(
-                (changed_set - renamed_new_paths) | set(incremental_plan.deleted_relpaths)
-            )
+            # Phase 3.3: deleted files are still handled here, file-
+            # granularity, exactly as Phase 3.1 established (nothing
+            # left to compare a deleted file's symbols against, and
+            # nothing will re-parse it). MODIFIED files (and a rename's
+            # new path) are deliberately EXCLUDED from this file-level
+            # purge as of Phase 3.3 -- purging an entire modified file's
+            # doc_ids up front, as Phase 3.1 originally did, would have
+            # thrown away exactly the still-correct, still-valid entries
+            # for its UNCHANGED symbols before the new, symbol-level
+            # `_diff_and_purge_file_symbols` (called per-file inside the
+            # parse loop below) ever gets a chance to decide they didn't
+            # need touching at all. Added files never needed this
+            # (nothing exists yet to purge) either way.
+            stale_paths = sorted(set(incremental_plan.deleted_relpaths))
             self._purge_stale_entries(repo_id, stale_paths)
         elif incremental_plan.reason:
             logger.info("Full re-index for repo_id=%s: %s", repo_id, incremental_plan.reason)
@@ -673,6 +799,13 @@ class IndexingEngine:
         # not the symbol's identity -- this is how embeddings get correctly
         # linked back to a specific Symbol row during persistence (Phase 0.5).
         chunk_symbol_map: dict[int, Symbol] = {}
+        # Phase 3.3: `id(sym)` of every freshly parsed symbol determined
+        # to be byte-identical (same `body_hash`) to its existing,
+        # durable row -- populated per-file by `_diff_and_purge_file_symbols`
+        # below. Accumulated across every file parsed this run so both
+        # the chunking step (immediately below) and the BM25 population
+        # step (later in this method) can skip the same symbols.
+        unchanged_symbol_ids: set[int] = set()
 
         # 2. Parse files with AST parsers
         for idx, file_path in enumerate(all_files, start=1):
@@ -715,8 +848,30 @@ class IndexingEngine:
                 self.parse_results[f"{repo_id}::{rel_path}"] = parse_res
                 parsed_files.append(parse_res)
 
+                # Phase 3.3: compare this file's freshly parsed symbols
+                # against its existing, durable rows (if any) and purge
+                # exactly the doc_ids that need it -- skipped for a
+                # rename's new path, since `_rekey_renamed_files` already
+                # purged that file's doc_ids in full (every symbol's
+                # doc_id embeds the file path, so it changes regardless
+                # of body content -- see that method's own docstring).
+                # A brand-new file (never indexed before) or a full,
+                # non-incremental run both safely no-op here (nothing to
+                # compare against / not called at all, respectively).
+                if incremental_plan.is_incremental and rel_path not in renamed_new_paths:
+                    unchanged_symbol_ids |= self._diff_and_purge_file_symbols(
+                        repo_id, rel_path, parse_res.symbols
+                    )
+
                 for sym in parse_res.symbols:
                     all_symbols.append(sym)
+                    if id(sym) in unchanged_symbol_ids:
+                        # Phase 3.3 -- the single biggest cost saver §9
+                        # describes: this symbol's body is byte-identical
+                        # to what's already durably stored and correctly
+                        # indexed, so it is neither re-chunked nor
+                        # re-submitted for embedding at all.
+                        continue
                     # Generate semantic chunks
                     chunks = self.chunker.chunk_symbol(sym)
                     for c in chunks:
@@ -858,6 +1013,18 @@ class IndexingEngine:
             doc_id = f"{repo_id}::{sym.file_path}::{sym.name}"
             self.symbols_by_id[doc_id] = sym
             self.symbol_repo_map[doc_id] = repo_id
+            if id(sym) in unchanged_symbol_ids:
+                # Phase 3.3: this symbol's existing lexical document is
+                # already correct and was deliberately left untouched by
+                # `_diff_and_purge_file_symbols` (never purged) -- adding
+                # it again here would create a duplicate Tantivy
+                # document under the same doc_id. `unchanged_symbol_ids`
+                # is only ever populated during an incremental run (see
+                # its own docstring), so this is unreachable -- and would
+                # be unsafe -- during a full run, where `remove_repo`
+                # just unconditionally wiped every symbol's document
+                # above and every one of them genuinely needs re-adding.
+                continue
             self.bm25_index.add_symbol(doc_id, sym, repo_id=repo_id)
 
         self.bm25_index.build()
@@ -899,6 +1066,11 @@ class IndexingEngine:
             "deleted_files": list(incremental_plan.deleted_relpaths),
             # Phase 3.2: {old, new} pairs re-keyed in place this run.
             "renamed_files": [{"old": old, "new": new} for old, new in incremental_plan.renamed],
+            # Phase 3.3: how many symbols were recognized as byte-
+            # identical to their existing, durable row and therefore
+            # skipped re-chunking/re-embedding (and, for BM25, skipped
+            # re-adding) entirely this run.
+            "symbols_skipped_unchanged": len(unchanged_symbol_ids),
         }
 
     def _persist_to_db(

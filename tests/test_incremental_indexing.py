@@ -735,3 +735,213 @@ def test_renamed_file_and_an_unrelated_addition_together(tmp_path, shared_embedd
         assert sym_after.id == symbol_id_before, "the rename must have re-keyed, not purged, the existing symbol"
     finally:
         session.close()
+
+
+# --- Phase 3.3: symbol-level body_hash comparison to skip unchanged embeddings
+
+TWO_SYMBOL_FILE = (
+    'def stable():\n    """A symbol that never changes."""\n    return 1\n\n\n'
+    'def changing():\n    """A symbol that will be edited."""\n    return 2\n'
+)
+
+
+def test_unchanged_symbol_within_a_modified_file_skips_embedding_and_bm25_readd(tmp_path, shared_embedder):
+    repo = tmp_path / "repo_symbol_skip"
+    _init_repo(repo)
+    _write(repo, "mixed.py", TWO_SYMBOL_FILE)
+    _write(repo, "keep.py", BETA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "symbol_skip.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+
+    session = engine.storage.get_session()
+    try:
+        fm = session.query(FileModel).filter(FileModel.repo_id == repo_id, FileModel.path == "mixed.py").first()
+        stable_before = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id, SymbolModel.name == "stable").first()
+        changing_before = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id, SymbolModel.name == "changing").first()
+        stable_id, stable_body_hash = stable_before.id, stable_before.body_hash
+        changing_id = changing_before.id
+        stable_emb_id = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == stable_id).first().id
+    finally:
+        session.close()
+
+    # Edit ONLY `changing()`'s body -- `stable()` is byte-identical.
+    _write(
+        repo,
+        "mixed.py",
+        'def stable():\n    """A symbol that never changes."""\n    return 1\n\n\n'
+        'def changing():\n    """A symbol that will be edited."""\n    return 999\n',
+    )
+    _commit_all(repo, "edit changing() only")
+
+    call_count = {"n": 0}
+    original_encode = engine.embedder.encode
+
+    def _spy_encode(texts, *args, **kwargs):
+        call_count["n"] += 1
+        assert not any("never changes" in t for t in texts), (
+            "stable()'s byte-identical content must never be re-submitted for embedding"
+        )
+        return original_encode(texts, *args, **kwargs)
+
+    engine.embedder.encode = _spy_encode  # type: ignore[method-assign]
+    try:
+        result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    finally:
+        engine.embedder.encode = original_encode  # type: ignore[method-assign]
+
+    assert result2["incremental"] is True
+    assert result2["symbols_skipped_unchanged"] == 1
+    assert call_count["n"] >= 1, "changing() must still be embedded"
+
+    session = engine.storage.get_session()
+    try:
+        fm2 = session.query(FileModel).filter(FileModel.repo_id == repo_id, FileModel.path == "mixed.py").first()
+        stable_after = session.query(SymbolModel).filter(SymbolModel.id == stable_id).first()
+        changing_after = session.query(SymbolModel).filter(SymbolModel.file_id == fm2.id, SymbolModel.name == "changing").first()
+
+        assert stable_after is not None, "stable()'s row must not have been touched/removed"
+        assert stable_after.body_hash == stable_body_hash
+        stable_emb_after = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == stable_id).first()
+        assert stable_emb_after is not None and stable_emb_after.id == stable_emb_id, (
+            "stable()'s embedding row must be preserved untouched, not deleted or duplicated"
+        )
+
+        assert changing_after.id == changing_id, "changing() is matched (same name/start_line) so keeps its id"
+        assert "999" in changing_after.body
+    finally:
+        session.close()
+
+    # No bm25 duplication: exactly 3 live documents (stable, changing, keep's symbol).
+    assert engine.bm25_index.num_docs == 3
+
+    stable_results = engine.search("stable never changes", limit=5, search_type="keyword", repository_id=repo_id)
+    assert any(r.symbol_name == "stable" for r in stable_results)
+
+
+def test_disappeared_symbol_within_a_modified_file_is_cleaned_up(tmp_path, shared_embedder):
+    repo = tmp_path / "repo_symbol_disappear"
+    _init_repo(repo)
+    _write(repo, "mixed.py", TWO_SYMBOL_FILE)
+    _write(repo, "keep.py", BETA)
+    _write(repo, "keep2.py", GAMMA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "symbol_disappear.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+
+    # Remove `changing()` entirely from the file -- `stable()` remains,
+    # unedited. The FILE still exists (git sees it as "modified", not
+    # deleted) but one of its SYMBOLS has disappeared.
+    _write(repo, "mixed.py", 'def stable():\n    """A symbol that never changes."""\n    return 1\n')
+    _commit_all(repo, "remove changing()")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["incremental"] is True
+    assert result2["symbols_skipped_unchanged"] == 1  # stable() is still untouched
+
+    session = engine.storage.get_session()
+    try:
+        fm = session.query(FileModel).filter(FileModel.repo_id == repo_id, FileModel.path == "mixed.py").first()
+        remaining_names = {
+            sm.name for sm in session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
+        }
+        assert remaining_names == {"stable"}, "changing()'s row must be deleted, not orphaned"
+    finally:
+        session.close()
+
+    assert engine.bm25_index.num_docs == 3  # stable + keep.py's + keep2.py's symbols
+
+    results = engine.search("changing edited", limit=5, search_type="keyword", repository_id=repo_id)
+    assert not any(r.symbol_name == "changing" for r in results)
+
+
+def test_pure_rename_does_not_apply_the_symbol_skip_optimization(tmp_path, shared_embedder):
+    """Documents the disclosed Phase 3.3 scope boundary: a renamed file's
+    symbols are never diffed for the skip optimization (every doc_id
+    embeds the file path, so it changes regardless of body content --
+    see `_diff_and_purge_file_symbols`'s own docstring). This locks in
+    that Phase 3.1/3.2's existing full-re-embed-on-rename behavior is
+    unaffected by Phase 3.3."""
+    repo = tmp_path / "repo_rename_no_skip"
+    _init_repo(repo)
+    _write(repo, "old_name.py", ALPHA)
+    _write(repo, "keep.py", BETA)
+    _write(repo, "keep2.py", GAMMA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "rename_no_skip.db"), shared_embedder)
+    engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+
+    (repo / "old_name.py").rename(repo / "new_name.py")
+    _commit_all(repo, "pure rename")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["renamed_files"] == [{"old": "old_name.py", "new": "new_name.py"}]
+    assert result2["symbols_skipped_unchanged"] == 0
+
+
+def test_full_reindex_never_applies_the_symbol_skip_optimization(tmp_path, shared_embedder):
+    """The skip optimization is deliberately incremental-only (see
+    `_diff_and_purge_file_symbols`'s docstring): a full re-index's
+    unconditional `bm25_index.remove_repo` wipe means EVERY symbol
+    genuinely needs re-adding, so `unchanged_symbol_ids` must stay
+    empty on a full run even though most content is unchanged."""
+    repo = tmp_path / "repo_full_no_skip"
+    _init_repo(repo)
+    _write(repo, "a.py", ALPHA)
+    _write(repo, "b.py", BETA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "full_no_skip.db"), shared_embedder)
+    engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+
+    # Change both of 2 files (100% > 50% threshold) to force a full re-index.
+    _write(repo, "a.py", 'def alpha():\n    """Modified."""\n    return 100\n')
+    _write(repo, "b.py", 'def beta():\n    """Modified."""\n    return 200\n')
+    _commit_all(repo, "modify both")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["incremental"] is False
+    assert result2["symbols_skipped_unchanged"] == 0
+    assert engine.bm25_index.num_docs == 2, "a full re-index must not duplicate or drop any lexical document"
+
+
+def test_call_graph_remains_correct_for_a_skipped_symbol(tmp_path, shared_embedder):
+    """The call graph is built from the full `FileParseResult` (every
+    parsed symbol), independent of the Phase 3.3 skip decision, which
+    only affects chunking/embedding/BM25 -- verified directly."""
+    repo = tmp_path / "repo_symbol_skip_callgraph"
+    _init_repo(repo)
+    _write(
+        repo,
+        "mixed.py",
+        'def helper():\n    """A helper, never edited."""\n    return 1\n\n\n'
+        'def caller():\n    """Calls helper -- this one will be edited."""\n    return helper()\n',
+    )
+    _write(repo, "keep.py", BETA)
+    _commit_all(repo, "initial")
+
+    engine = _new_engine(_db_url(tmp_path, "symbol_skip_callgraph.db"), shared_embedder)
+    result1 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    repo_id = result1["repository_id"]
+    edges_before = len(engine.call_graphs[repo_id].edges)
+    assert edges_before >= 1
+
+    _write(
+        repo,
+        "mixed.py",
+        'def helper():\n    """A helper, never edited."""\n    return 1\n\n\n'
+        'def caller():\n    """Calls helper -- this one will be edited, edit #2."""\n    return helper()\n',
+    )
+    _commit_all(repo, "edit caller's docstring only")
+
+    result2 = engine.index_directory(str(repo), repo_name="r", repo_url=str(repo))
+    assert result2["symbols_skipped_unchanged"] == 1  # helper() is untouched
+
+    edges_after = engine.call_graphs[repo_id].edges
+    assert len(edges_after) == edges_before
+    assert any(e.source_symbol_name == "caller" and e.target_symbol_name == "helper" for e in edges_after)
