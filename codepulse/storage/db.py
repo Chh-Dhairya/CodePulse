@@ -122,10 +122,29 @@ class CallEdge(Base):
     this milestone). Actually avoiding that accumulation by recomputing
     only the edges touching changed symbols is roadmap item 3.5's job
     ("local BFS-based incremental graph updates"), not this one's.
+
+    `repo_id` (post-Phase-3.4 isolation fix, migration `2cd38eb12a7e`):
+    every row written by `IndexingEngine.
+    _persist_to_db` from here on carries the repository it belongs to.
+    Before this fix, `CallEdge` (and `DependencyModel` before it) had NO
+    repository association at all -- a confirmed, real cross-repository
+    data leak: `GET /v1/symbols/{id}` queried this table by symbol name
+    alone, so a caller authorized for one repository could receive
+    another, unrelated repository's call-graph edges whenever symbol
+    names happened to collide. Nullable because some historical rows
+    (persisted before this fix existed) cannot be attributed to a
+    repository with full confidence -- see that migration's own
+    docstring for the exact backfill rule (unambiguous match only, never
+    a guess). A `NULL`-`repo_id` row is invisible to every
+    repository-scoped query by construction (a real, honestly-disclosed
+    completeness gap for that specific historical edge, not a security
+    problem) until its repository is next re-indexed, which persists a
+    fresh, correctly-scoped replacement.
     """
     __tablename__ = "call_edges"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=True, index=True)
     source_symbol_name = Column(String(255), nullable=False, index=True)
     source_file = Column(Text, nullable=False)
     target_symbol_name = Column(String(255), nullable=False, index=True)

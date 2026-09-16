@@ -1359,10 +1359,23 @@ class IndexingEngine:
             # across re-indexes -- rows simply accumulate every run, a
             # pre-existing, disclosed Phase 0.4 limitation this milestone
             # does not change; recomputing only the edges touching
-            # changed symbols is roadmap item 3.5's job, not 3.4's.)
+            # changed symbols is roadmap item 3.5's job, not 3.4's.
+            #
+            # Post-Phase-3.4 isolation fix: every row now carries
+            # `repo_id=repo_record.id` -- the repository this exact
+            # `_persist_to_db` call is persisting, which is guaranteed to
+            # be the SAME repository `self.call_graph` was just built for
+            # earlier in this same `index_directory()` invocation (that
+            # alias is only ever read-then-written within one call, never
+            # across two interleaved ones). Without this, `CallEdge` rows
+            # had no repository association at all, and callers filtering
+            # by symbol name alone (e.g. GET /v1/symbols/{id}) could
+            # receive an unrelated repository's edges -- a real, confirmed
+            # cross-repository data leak, fixed here at the source.
             if self.call_graph:
                 for edge in self.call_graph.edges:
                     ce = CallEdge(
+                        repo_id=repo_record.id,
                         source_symbol_name=edge.source_symbol_name,
                         source_file=edge.source_file,
                         target_symbol_name=edge.target_symbol_name,

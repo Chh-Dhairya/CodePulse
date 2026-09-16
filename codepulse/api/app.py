@@ -344,15 +344,25 @@ def get_symbol_details(symbol_id: int, auth: AuthorizedKey = Depends(require_api
             raise HTTPException(status_code=404, detail="Symbol not found")
         auth.authorize_repository(sym.file.repo_id)
 
-        # Query call graph relations
+        # Query call graph relations. Repository-isolation fix: scoped to
+        # `sym.file.repo_id` -- previously filtered by symbol name alone,
+        # a confirmed cross-repository data leak (a caller authorized for
+        # one repository could receive another, unrelated repository's
+        # call-graph edges whenever symbol names happened to collide).
+        # `CallEdge.repo_id` is nullable (a legacy row that predates this
+        # fix and could not be unambiguously backfilled) -- such a row
+        # simply never matches this filter, so it's invisible here rather
+        # than leaking; see CallEdge's own docstring.
         called_by = (
             session.query(CallEdge)
             .filter(CallEdge.target_symbol_name == sym.name)
+            .filter(CallEdge.repo_id == sym.file.repo_id)
             .all()
         )
         calls = (
             session.query(CallEdge)
             .filter(CallEdge.source_symbol_name == sym.name)
+            .filter(CallEdge.repo_id == sym.file.repo_id)
             .all()
         )
 
@@ -441,9 +451,19 @@ def analyze_impact(
             raise HTTPException(status_code=404, detail="Symbol not found")
         auth.authorize_repository(sym.file.repo_id)
 
-        if indexing_engine.call_graph:
-            callers = indexing_engine.call_graph.get_callers(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
-            callees = indexing_engine.call_graph.get_callees(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
+        # Repository-isolation fix: `indexing_engine.call_graph` is the
+        # "most recently indexed repository" singular alias (Phase 0.6),
+        # which in a long-lived, multi-repository server process is NOT
+        # necessarily this symbol's own repository -- using it here would
+        # traverse whatever repository happened to be indexed last,
+        # either silently returning another repository's callers/callees
+        # or missing this one's entirely. `indexing_engine.call_graphs`
+        # (per-repo, keyed by `repo_id`) is the correctly-scoped
+        # structure this endpoint should have used from the start.
+        repo_call_graph = indexing_engine.call_graphs.get(sym.file.repo_id)
+        if repo_call_graph:
+            callers = repo_call_graph.get_callers(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
+            callees = repo_call_graph.get_callees(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
         else:
             callers, callees = [], []
 
