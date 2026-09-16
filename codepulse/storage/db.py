@@ -99,8 +99,31 @@ class SymbolModel(Base):
     embeddings = relationship("EmbeddingModel", back_populates="symbol", cascade="all, delete-orphan")
 
 
-class DependencyModel(Base):
-    __tablename__ = "dependencies"
+class CallEdge(Base):
+    """
+    Phase 3.4 (roadmap §37 item 3.4: "CallEdge.confidence scoring"; §11:
+    "every `CallEdge` should carry a `confidence` field -- `high` when
+    resolved through an explicit import mapping to a known file+symbol,
+    `low` when resolved only by bare-name match against same-file
+    symbols, `unresolved` when the callee couldn't be matched to any
+    known symbol at all"). Renamed from `DependencyModel` (table
+    `dependencies` -> `call_edges`) per §29's Data Model target entity
+    name, migration `f6e481353553`.
+
+    `confidence` is nullable: rows persisted before this migration have
+    no historical resolution-path information to backfill honestly
+    (CLAUDE.md: no fabricated metrics) and show `NULL` until their
+    repository's next re-index recomputes and persists a real value --
+    see that migration's own docstring.
+
+    Like its `DependencyModel` predecessor, rows are still NOT upserted
+    or deduplicated across re-indexes -- they simply accumulate every
+    run (a pre-existing, disclosed Phase 0.4 limitation, unchanged by
+    this milestone). Actually avoiding that accumulation by recomputing
+    only the edges touching changed symbols is roadmap item 3.5's job
+    ("local BFS-based incremental graph updates"), not this one's.
+    """
+    __tablename__ = "call_edges"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     source_symbol_name = Column(String(255), nullable=False, index=True)
@@ -108,6 +131,7 @@ class DependencyModel(Base):
     target_symbol_name = Column(String(255), nullable=False, index=True)
     target_file = Column(Text, nullable=True)
     call_count = Column(Integer, default=1)
+    confidence = Column(String(20), nullable=True)
 
 
 class EmbeddingModel(Base):

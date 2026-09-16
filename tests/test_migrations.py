@@ -12,7 +12,7 @@ from codepulse.storage.db import (
     RepositoryModel,
     FileModel,
     SymbolModel,
-    DependencyModel,
+    CallEdge,
     EmbeddingModel,
     StorageManager,
 )
@@ -73,7 +73,7 @@ def test_fresh_database_migration_scenario_1():
             "repositories",
             "files",
             "symbols",
-            "dependencies",
+            "call_edges",
             "code_embeddings",
             "api_keys",
             "api_key_repositories",
@@ -82,10 +82,10 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the Phase 3.1
-        # add_repository_snapshot_model migration)
+        # Verify revision recorded (head now includes the Phase 3.4
+        # rename_dependency_to_call_edge_add_confidence migration)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "c286d277ea21"
+        assert current_rev == "f6e481353553"
 
         # Verify columns on symbols table
         symbol_cols = {col["name"]: col for col in insp.get_columns("symbols")}
@@ -231,9 +231,9 @@ def test_existing_database_stamping_scenario_2():
         stamp_database(db_url=db_url, revision="head")
 
         # Verify alembic_version is now recorded (head now includes the
-        # Phase 3.1 add_repository_snapshot_model migration)
+        # Phase 3.4 rename_dependency_to_call_edge_add_confidence migration)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "c286d277ea21"
+        assert current_rev == "f6e481353553"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:

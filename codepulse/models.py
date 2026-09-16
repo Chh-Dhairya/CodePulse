@@ -66,6 +66,14 @@ class CallGraphEdge(BaseModel):
     target_symbol_name: str
     target_file: Optional[str] = None
     call_count: int = 1
+    # Phase 3.4 (roadmap §37 item 3.4; §11): "high" -- resolved through an
+    # explicit import mapping to a known file+symbol; "low" -- resolved
+    # only by bare-name match against same-file symbols; "unresolved" --
+    # the callee couldn't be matched to any known symbol at all. Always
+    # set explicitly by CallGraphBuilder._build_graph (see its own
+    # comments) -- the "unresolved" default here is a safe fallback for
+    # any other construction path, never itself a claim of resolution.
+    confidence: str = "unresolved"
 
 
 class FileParseResult(BaseModel):

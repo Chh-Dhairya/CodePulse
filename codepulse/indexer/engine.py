@@ -22,7 +22,7 @@ from codepulse.search.bm25 import BM25Index
 from codepulse.search.ranker import HybridRanker, SearchResultItem
 from codepulse.search.vector import VectorIndex
 from codepulse.storage.db import (
-    DependencyModel,
+    CallEdge,
     EmbeddingModel,
     FileModel,
     RepositoryModel,
@@ -448,11 +448,12 @@ class IndexingEngine:
         file already behaves today -- a pre-existing Phase 0.4 limitation
         (no `(name, type)`-based, start_line-independent matching exists
         anywhere in this codebase yet), not something this milestone
-        newly introduces or is required to fix. `DependencyModel` rows
-        recorded before the rename also keep referencing the OLD path
-        string (call graph edges are never deduped/corrected across a
-        rename, or across any other kind of re-index -- a pre-existing
-        gap explicitly assigned to roadmap items 3.4/3.5's "Call graph
+        newly introduces or is required to fix. `CallEdge` rows (named
+        `DependencyModel` before Phase 3.4) recorded before the rename
+        also keep referencing the OLD path string (call graph edges are
+        never deduped/corrected across a rename, or across any other
+        kind of re-index -- a pre-existing gap explicitly assigned to
+        roadmap items 3.4/3.5's "Call graph
         updates" work, not 3.2's).
 
         Conservative fallback (matching the roadmap's own risk-register
@@ -1352,17 +1353,24 @@ class IndexingEngine:
 
             session.flush()
 
-            # Persist call graph edges (unchanged; not upserted -- Phase 3 scope)
+            # Persist call graph edges (Phase 3.4: now carrying a real,
+            # computed `confidence` tier per edge -- see
+            # CallGraphBuilder._build_graph. Still NOT upserted/deduped
+            # across re-indexes -- rows simply accumulate every run, a
+            # pre-existing, disclosed Phase 0.4 limitation this milestone
+            # does not change; recomputing only the edges touching
+            # changed symbols is roadmap item 3.5's job, not 3.4's.)
             if self.call_graph:
                 for edge in self.call_graph.edges:
-                    dm = DependencyModel(
+                    ce = CallEdge(
                         source_symbol_name=edge.source_symbol_name,
                         source_file=edge.source_file,
                         target_symbol_name=edge.target_symbol_name,
                         target_file=edge.target_file,
                         call_count=edge.call_count,
+                        confidence=edge.confidence,
                     )
-                    session.add(dm)
+                    session.add(ce)
 
             session.commit()
             return {

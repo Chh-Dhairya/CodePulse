@@ -16,7 +16,13 @@ class ImportResolver:
         else:
             self.files = {path.replace("\\", "/"): res for path, res in parse_results.items()}
 
-        # Build symbol lookup index: (file_path, symbol_name) -> Symbol
+        # Build symbol lookup index: (file_path, symbol_name) -> Symbol.
+        # Phase 3.4: this was built here from this class's earliest
+        # version but never actually read by anything -- now used by
+        # `CallGraphBuilder._build_graph` to confirm an import-resolved
+        # callee is a genuine known symbol in its target file (§11's
+        # "high" confidence tier requires a known file+SYMBOL, not just
+        # a known file).
         self.symbol_index: dict[tuple[str, str], Symbol] = {}
         for file_path, res in self.files.items():
             for sym in res.symbols:
@@ -88,30 +94,72 @@ class CallGraphBuilder:
 
             local_symbols = {s.name: s for s in res.symbols}
 
-            # Map calls to target symbols
+            # Map calls to target symbols. Phase 3.4 (roadmap §37 item
+            # 3.4; §11): every resolution decision below already existed
+            # -- this milestone's job is to SURFACE which one applied,
+            # not to change which edges get created.
             call_counts: dict[tuple[str, str, str, Optional[str]], int] = defaultdict(int)
+            call_confidence: dict[tuple[str, str, str, Optional[str]], str] = {}
 
             for call in res.calls:
                 caller = call.caller_symbol
                 callee = call.callee_name
 
-                # Check if callee is in the same file
                 if callee in local_symbols:
-                    call_counts[(caller, file_path, callee, file_path)] += 1
+                    # §11: "low -- resolved only by bare-name match
+                    # against same-file symbols." This is the exact
+                    # ambiguity §3.5's audit finding names: two unrelated
+                    # classes both defining a same-named method in this
+                    # file would be conflated here, so this can never be
+                    # "high" no matter how the match was made.
+                    key = (caller, file_path, callee, file_path)
+                    confidence = "low"
                 elif callee in import_map:
                     target_file = import_map[callee]
-                    call_counts[(caller, file_path, callee, target_file)] += 1
+                    key = (caller, file_path, callee, target_file)
+                    # §11: "high -- resolved through an explicit import
+                    # mapping to a known file+SYMBOL" -- a resolved
+                    # import path alone only proves a known FILE; cross-
+                    # checking `self.resolver.symbol_index` (built since
+                    # this class's very first version, but never read by
+                    # anything until now) confirms the callee is an
+                    # actual extracted symbol in that file before this
+                    # edge is allowed to claim "high". If the file
+                    # resolved but the exact symbol can't be confirmed
+                    # in it (e.g. a wildcard import, a re-exported
+                    # alias, or a file that failed to parse that
+                    # symbol), this deliberately does NOT fall back to
+                    # "low" -- "low" is defined above as a SAME-FILE
+                    # bare-name match, and this is a cross-file case, so
+                    # the honest, non-overclaiming tier is "unresolved".
+                    if (target_file, callee) in self.resolver.symbol_index:
+                        confidence = "high"
+                    else:
+                        confidence = "unresolved"
                 else:
-                    # External / unresolved call
-                    call_counts[(caller, file_path, callee, None)] += 1
+                    # §11: "unresolved -- the callee couldn't be matched
+                    # to any known symbol at all" (a true external call,
+                    # e.g. a stdlib/third-party function).
+                    key = (caller, file_path, callee, None)
+                    confidence = "unresolved"
 
-            for (src_sym, src_file, tgt_sym, tgt_file), count in call_counts.items():
+                call_counts[key] += 1
+                # Every call to this exact (caller, file, callee) triple
+                # resolves through the identical branch above every time
+                # (the decision depends only on `callee`/`file_path`, not
+                # on the specific call site), so this is always a no-op
+                # re-assignment of the same value, never a real conflict.
+                call_confidence[key] = confidence
+
+            for key, count in call_counts.items():
+                src_sym, src_file, tgt_sym, tgt_file = key
                 edge = CallGraphEdge(
                     source_symbol_name=src_sym,
                     source_file=src_file,
                     target_symbol_name=tgt_sym,
                     target_file=tgt_file,
                     call_count=count,
+                    confidence=call_confidence[key],
                 )
                 self.edges.append(edge)
 

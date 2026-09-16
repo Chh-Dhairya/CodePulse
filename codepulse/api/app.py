@@ -18,7 +18,7 @@ from codepulse.ingestion_safety import IngestionSafetyError, validate_git_url, v
 from codepulse.jobs import create_job, get_active_job, get_job, mark_failed, mark_running, mark_succeeded
 from codepulse.rate_limit import get_limiter
 from codepulse.storage.db import (
-    DependencyModel,
+    CallEdge,
     FileModel,
     RepositoryModel,
     StorageManager,
@@ -346,13 +346,13 @@ def get_symbol_details(symbol_id: int, auth: AuthorizedKey = Depends(require_api
 
         # Query call graph relations
         called_by = (
-            session.query(DependencyModel)
-            .filter(DependencyModel.target_symbol_name == sym.name)
+            session.query(CallEdge)
+            .filter(CallEdge.target_symbol_name == sym.name)
             .all()
         )
         calls = (
-            session.query(DependencyModel)
-            .filter(DependencyModel.source_symbol_name == sym.name)
+            session.query(CallEdge)
+            .filter(CallEdge.source_symbol_name == sym.name)
             .all()
         )
 
@@ -365,8 +365,19 @@ def get_symbol_details(symbol_id: int, auth: AuthorizedKey = Depends(require_api
             "line_end": sym.end_line,
             "docstring": sym.docstring,
             "source_code": sym.body,
-            "called_by": [{"symbol": d.source_symbol_name, "file": d.source_file} for d in called_by],
-            "calls": [{"symbol": d.target_symbol_name, "file": d.target_file} for d in calls],
+            # Phase 3.4 (roadmap §11, §42): "confidence scoring surfaced
+            # to callers, not hidden" -- `d.confidence` is `None` for any
+            # row persisted before this milestone's migration (see
+            # CallEdge's own docstring), never fabricated to something
+            # else just to fill the field.
+            "called_by": [
+                {"symbol": d.source_symbol_name, "file": d.source_file, "confidence": d.confidence}
+                for d in called_by
+            ],
+            "calls": [
+                {"symbol": d.target_symbol_name, "file": d.target_file, "confidence": d.confidence}
+                for d in calls
+            ],
             "complexity": sym.complexity,
         }
     finally:
