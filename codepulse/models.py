@@ -29,6 +29,22 @@ class Symbol(BaseModel):
     language: str
     parent_symbol: Optional[str] = None
     complexity: int = 1
+    # Phase 4.1 (roadmap §37 item 4.1: "Base-class/inheritance extraction
+    # (Python + JS/TS)"; §29: "Symbol... needs... base-class field").
+    # Raw, unresolved base-class expressions exactly as written in source
+    # (e.g. ["Base", "pkg.Mixin"]) -- populated only for CLASS symbols,
+    # always empty for every other symbol type. This is the honest,
+    # never-fabricated extraction; RESOLVING each name to a real symbol
+    # (with confidence) is a separate, derived step performed by
+    # `CallGraphBuilder` -- the exact same layering already established
+    # for `CallReference.callee_name` (raw) vs. `CallGraphEdge` (resolved,
+    # confidence-scored). A `keyword_argument` in a Python class's base
+    # list (e.g. `metaclass=Meta`) is deliberately excluded here -- it is
+    # not a base class. A TypeScript `implements` clause is also
+    # deliberately excluded -- interface implementation is a different
+    # relationship than base-class inheritance, not extracted in this
+    # milestone.
+    base_classes: list[str] = Field(default_factory=list)
 
     def model_post_init(self, __context) -> None:
         if not self.body_hash and self.body:
@@ -74,6 +90,13 @@ class CallGraphEdge(BaseModel):
     # comments) -- the "unresolved" default here is a safe fallback for
     # any other construction path, never itself a claim of resolution.
     confidence: str = "unresolved"
+    # Phase 4.1 (roadmap §37 item 4.1): "calls" (default, matching every
+    # edge this project has ever persisted before this field existed) or
+    # "inherits" (a resolved base-class relationship). Always set
+    # explicitly by CallGraphBuilder._build_graph for both kinds -- the
+    # "calls" default here is a safe fallback for any other construction
+    # path, matching this project's existing historical data exactly.
+    relationship_type: str = "calls"
 
 
 class FileParseResult(BaseModel):

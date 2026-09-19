@@ -4,7 +4,7 @@ import os
 from collections import defaultdict, deque
 from typing import Optional
 
-from codepulse.models import CallGraphEdge, FileParseResult, ImportStatement, Symbol
+from codepulse.models import CallGraphEdge, FileParseResult, ImportStatement, Symbol, SymbolType
 
 
 class ImportResolver:
@@ -71,15 +71,84 @@ class ImportResolver:
 
 
 class CallGraphBuilder:
-    """Builds and queries the symbol call graph (Phase 2B - Acyclic & Cycle-Safe)."""
+    """
+    Builds and queries the symbol call graph (Phase 2B - Acyclic &
+    Cycle-Safe).
+
+    Phase 4.1 (roadmap §37 item 4.1: "Base-class/inheritance extraction
+    (Python + JS/TS)"): also resolves inheritance relationships (a
+    class's `Symbol.base_classes`, raw text, into confidence-scored
+    edges), reusing this class's own existing import-resolution
+    philosophy verbatim (`_resolve_target`, factored out of the
+    call-edge logic this milestone found already implementing it
+    inline) rather than inventing a second resolution algorithm.
+
+    CRITICAL invariant, enforced by construction, not by convention:
+    inheritance edges are kept in `self.inheritance_edges`/
+    `self.inheritance_adjacency`/`self.reverse_inheritance_adjacency` --
+    entirely SEPARATE from `self.edges`/`self.adjacency`/
+    `self.reverse_adjacency`, which remain calls-only, exactly as before
+    this milestone. `get_callers`/`get_callees` traverse ONLY the
+    calls-only structures and are therefore semantically unchanged by
+    this milestone -- verified by this project's full pre-existing
+    call-graph test suite continuing to pass unmodified. A future
+    milestone wanting inheritance-aware traversal gets new, dedicated
+    methods (not built here -- out of this milestone's exact scope,
+    which is extraction + resolution, not a new query surface); it must
+    NOT be achieved by merging the two adjacency structures.
+    """
 
     def __init__(self, parse_results: dict[str, FileParseResult] | list[FileParseResult]) -> None:
         self.resolver = ImportResolver(parse_results)
         self.edges: list[CallGraphEdge] = []
-        # Adjacency lists for fast bidirectional traversal
+        # Adjacency lists for fast bidirectional traversal -- CALLS ONLY.
         self.adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         self.reverse_adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        # Phase 4.1: INHERITANCE ONLY -- deliberately separate structures,
+        # never merged with the calls-only ones above. See this class's
+        # own docstring for why.
+        self.inheritance_edges: list[CallGraphEdge] = []
+        self.inheritance_adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        self.reverse_inheritance_adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         self._build_graph()
+
+    def _resolve_target(
+        self, name: str, file_path: str, local_symbols: dict[str, Symbol], import_map: dict[str, str]
+    ) -> tuple[Optional[str], str]:
+        """
+        Shared resolution philosophy (roadmap §11), used identically by
+        BOTH call-edge and (Phase 4.1) inheritance-edge resolution --
+        factored out of what was previously call-edge-only inline logic,
+        with IDENTICAL behavior (verified by this project's existing
+        call-graph/confidence test suite continuing to pass unmodified
+        after this refactor) so the two relationship kinds can never
+        silently drift onto different resolution rules. Returns
+        `(target_file_or_None, confidence)`.
+
+        "high" -- resolved through an explicit import mapping to a known
+        file+SYMBOL (not just a known file -- cross-checked against
+        `self.resolver.symbol_index`). "low" -- resolved only by
+        bare-name match against same-file symbols (the ambiguity §3.5's
+        audit finding names: two unrelated classes/functions both
+        defining a same-named symbol in this file would be conflated
+        here, so this can never be "high" no matter how the match was
+        made). "unresolved" -- everything else, including a resolved
+        import file whose exact symbol couldn't be confirmed in it (a
+        cross-file case, so it deliberately does NOT fall back to "low",
+        which is defined as a same-file match only) and a true external
+        reference with no local or import match at all. Never a fourth
+        "ambiguous" tier -- deliberately reusing this exact 3-tier
+        vocabulary for inheritance too, not inventing a parallel one.
+        """
+        if name in local_symbols:
+            return file_path, "low"
+        elif name in import_map:
+            target_file = import_map[name]
+            if (target_file, name) in self.resolver.symbol_index:
+                return target_file, "high"
+            return target_file, "unresolved"
+        else:
+            return None, "unresolved"
 
     def _build_graph(self) -> None:
         for file_path, res in self.resolver.files.items():
@@ -104,44 +173,8 @@ class CallGraphBuilder:
             for call in res.calls:
                 caller = call.caller_symbol
                 callee = call.callee_name
-
-                if callee in local_symbols:
-                    # §11: "low -- resolved only by bare-name match
-                    # against same-file symbols." This is the exact
-                    # ambiguity §3.5's audit finding names: two unrelated
-                    # classes both defining a same-named method in this
-                    # file would be conflated here, so this can never be
-                    # "high" no matter how the match was made.
-                    key = (caller, file_path, callee, file_path)
-                    confidence = "low"
-                elif callee in import_map:
-                    target_file = import_map[callee]
-                    key = (caller, file_path, callee, target_file)
-                    # §11: "high -- resolved through an explicit import
-                    # mapping to a known file+SYMBOL" -- a resolved
-                    # import path alone only proves a known FILE; cross-
-                    # checking `self.resolver.symbol_index` (built since
-                    # this class's very first version, but never read by
-                    # anything until now) confirms the callee is an
-                    # actual extracted symbol in that file before this
-                    # edge is allowed to claim "high". If the file
-                    # resolved but the exact symbol can't be confirmed
-                    # in it (e.g. a wildcard import, a re-exported
-                    # alias, or a file that failed to parse that
-                    # symbol), this deliberately does NOT fall back to
-                    # "low" -- "low" is defined above as a SAME-FILE
-                    # bare-name match, and this is a cross-file case, so
-                    # the honest, non-overclaiming tier is "unresolved".
-                    if (target_file, callee) in self.resolver.symbol_index:
-                        confidence = "high"
-                    else:
-                        confidence = "unresolved"
-                else:
-                    # §11: "unresolved -- the callee couldn't be matched
-                    # to any known symbol at all" (a true external call,
-                    # e.g. a stdlib/third-party function).
-                    key = (caller, file_path, callee, None)
-                    confidence = "unresolved"
+                target_file, confidence = self._resolve_target(callee, file_path, local_symbols, import_map)
+                key = (caller, file_path, callee, target_file)
 
                 call_counts[key] += 1
                 # Every call to this exact (caller, file, callee) triple
@@ -160,6 +193,7 @@ class CallGraphBuilder:
                     target_file=tgt_file,
                     call_count=count,
                     confidence=call_confidence[key],
+                    relationship_type="calls",
                 )
                 self.edges.append(edge)
 
@@ -167,6 +201,40 @@ class CallGraphBuilder:
                 tgt_key = (tgt_file or "", tgt_sym)
                 self.adjacency[src_key].add(tgt_key)
                 self.reverse_adjacency[tgt_key].add(src_key)
+
+            # Phase 4.1: resolve inheritance relationships for every
+            # CLASS symbol in this file, reusing the SAME `import_map`/
+            # `local_symbols` already built above for calls (no second
+            # pass over `self.resolver.files`) and the SAME
+            # `_resolve_target` resolution philosophy. Each entry in a
+            # class's `base_classes` (raw text, from `Symbol.
+            # base_classes` -- see that field's own docstring for why
+            # raw and resolved are kept separate) becomes exactly one
+            # inheritance edge, stored ONLY in the inheritance-specific
+            # structures below -- never in `self.edges`/`self.adjacency`/
+            # `self.reverse_adjacency`.
+            for sym in res.symbols:
+                if sym.type != SymbolType.CLASS or not sym.base_classes:
+                    continue
+                for base_name in sym.base_classes:
+                    target_file, confidence = self._resolve_target(
+                        base_name, file_path, local_symbols, import_map
+                    )
+                    edge = CallGraphEdge(
+                        source_symbol_name=sym.name,
+                        source_file=file_path,
+                        target_symbol_name=base_name,
+                        target_file=target_file,
+                        call_count=1,
+                        confidence=confidence,
+                        relationship_type="inherits",
+                    )
+                    self.inheritance_edges.append(edge)
+
+                    src_key = (file_path, sym.name)
+                    tgt_key = (target_file or "", base_name)
+                    self.inheritance_adjacency[src_key].add(tgt_key)
+                    self.reverse_inheritance_adjacency[tgt_key].add(src_key)
 
     def get_callees(self, symbol_name: str, file_path: str = "", max_depth: int = 3) -> list[dict]:
         """Returns symbols called by the given symbol up to max_depth (downstream impact)."""

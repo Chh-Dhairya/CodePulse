@@ -1215,13 +1215,34 @@ class IndexingEngine:
         already-correct `CallEdge` rows are left exactly as they were,
         avoiding both the accumulation problem and any unnecessary
         rewrite.
+
+        Phase 4.1 (roadmap §37 item 4.1): also persists
+        `self.call_graph.inheritance_edges` (`relationship_type=
+        "inherits"`) through this EXACT SAME algorithm, alongside
+        `self.call_graph.edges` (`relationship_type="calls"`) -- not a
+        second persistence mechanism. This is correct, not just
+        convenient, because the delete/BFS logic above is already
+        relationship-type-AGNOSTIC: it deletes and recomputes by
+        `(source_file, source_symbol_name)` / `(target_file,
+        target_symbol_name)` alone, with no `relationship_type` filter
+        anywhere -- so a changed class's stale "calls" edges AND stale
+        "inherits" edges are both correctly deleted together (its
+        complete outgoing edge set changed, regardless of kind), and the
+        local-BFS-one-hop query already finds a caller through an
+        ordinary function call and a subclass extending a renamed/
+        deleted base class equally, via the exact same query. Each row
+        is still written with its own correct `relationship_type`,
+        taken directly from the in-memory `CallGraphEdge.
+        relationship_type` field.
         """
         if not self.call_graph:
             return
 
+        all_edges = self.call_graph.edges + self.call_graph.inheritance_edges
+
         if not is_incremental:
             session.query(CallEdge).filter(CallEdge.repo_id == repo_id).delete(synchronize_session=False)
-            for edge in self.call_graph.edges:
+            for edge in all_edges:
                 session.add(CallEdge(
                     repo_id=repo_id,
                     source_symbol_name=edge.source_symbol_name,
@@ -1230,6 +1251,7 @@ class IndexingEngine:
                     target_file=edge.target_file,
                     call_count=edge.call_count,
                     confidence=edge.confidence,
+                    relationship_type=edge.relationship_type,
                 ))
             return
 
@@ -1269,7 +1291,7 @@ class IndexingEngine:
             ).delete(synchronize_session=False)
 
         recompute_keys = changed_symbol_keys | one_hop_keys
-        for edge in self.call_graph.edges:
+        for edge in all_edges:
             if (edge.source_file, edge.source_symbol_name) not in recompute_keys:
                 continue
             session.add(CallEdge(
@@ -1280,6 +1302,7 @@ class IndexingEngine:
                 target_file=edge.target_file,
                 call_count=edge.call_count,
                 confidence=edge.confidence,
+                relationship_type=edge.relationship_type,
             ))
 
     def _persist_to_db(
@@ -1451,6 +1474,16 @@ class IndexingEngine:
                     .first()
                 )
 
+                # Phase 4.1: JSON-serialized to match the same "Text
+                # column holding a JSON-serialized list, parsed in
+                # application code" convention `embedding_json` already
+                # uses -- `None` (not `"[]"`) for a symbol with no base
+                # classes, so a never-(re)indexed-since-this-migration
+                # row (genuinely `NULL`) and a real "no bases" result
+                # remain visibly the same thing, which they are (both
+                # mean "nothing known/present"), not a false distinction.
+                base_classes_json = json.dumps(sym.base_classes) if sym.base_classes else None
+
                 if existing_sm is None:
                     sm = SymbolModel(
                         file_id=fm.id,
@@ -1464,6 +1497,7 @@ class IndexingEngine:
                         body_hash=sym.body_hash,
                         language=sym.language,
                         complexity=sym.complexity,
+                        base_classes=base_classes_json,
                     )
                     session.add(sm)
                     symbol_record_map[map_key] = sm
@@ -1477,6 +1511,7 @@ class IndexingEngine:
                     existing_sm.body_hash = sym.body_hash
                     existing_sm.language = sym.language
                     existing_sm.complexity = sym.complexity
+                    existing_sm.base_classes = base_classes_json
                     symbol_record_map[map_key] = existing_sm
                     updated_symbols += 1
                 else:

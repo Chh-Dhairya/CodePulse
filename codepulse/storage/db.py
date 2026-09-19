@@ -94,6 +94,16 @@ class SymbolModel(Base):
     body_hash = Column(String(64), default="")
     language = Column(String(50), nullable=False)
     complexity = Column(Integer, default=1)
+    # Phase 4.1 (roadmap §37 item 4.1; §29: "Symbol... needs... base-class
+    # field"). JSON-serialized `list[str]` of raw, unresolved base-class
+    # expressions (e.g. '["Base", "pkg.Mixin"]') -- the same "Text column
+    # holding a JSON-serialized list, parsed in application code"
+    # convention already established by `EmbeddingModel.embedding_json`,
+    # not a new serialization approach. `NULL` for a never-(re)indexed-
+    # since-this-migration row (see that migration's own docstring) and
+    # for every non-CLASS symbol; application code treats `NULL` the same
+    # as an empty list, never as "unknown."
+    base_classes = Column(Text, nullable=True)
 
     file = relationship("FileModel", back_populates="symbols")
     embeddings = relationship("EmbeddingModel", back_populates="symbol", cascade="all, delete-orphan")
@@ -145,6 +155,20 @@ class CallEdge(Base):
     completeness gap for that specific historical edge, not a security
     problem) until its repository is next re-indexed, which persists a
     fresh, correctly-scoped replacement.
+
+    `relationship_type` (Phase 4.1): `"calls"` (the only kind this table
+    has ever held, and the default/backfill value for every row that
+    predates this column -- unambiguous, not a guess, since nothing else
+    was ever written here) or `"inherits"` (a resolved base-class
+    relationship, roadmap §37 item 4.1). Both kinds share this one
+    table -- same `repo_id` scoping, same `confidence` vocabulary, same
+    Phase 3.5 incremental-update machinery -- but are kept in SEPARATE
+    in-memory adjacency structures by `CallGraphBuilder`
+    (`self.adjacency`/`self.reverse_adjacency` for `"calls"` only; a
+    distinct pair for `"inherits"`), so `get_callers`/`get_callees`
+    continue to traverse call relationships only, exactly as before this
+    column existed -- see `CallGraphBuilder._build_graph`'s own
+    docstring.
     """
     __tablename__ = "call_edges"
 
@@ -155,6 +179,7 @@ class CallEdge(Base):
     target_symbol_name = Column(String(255), nullable=False, index=True)
     target_file = Column(Text, nullable=True)
     call_count = Column(Integer, default=1)
+    relationship_type = Column(String(20), nullable=False, default="calls", server_default="calls")
     confidence = Column(String(20), nullable=True)
 
 

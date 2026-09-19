@@ -96,6 +96,7 @@ class PythonParser(LanguageParser):
         body_text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
         docstring = self._extract_docstring(node, source_bytes)
         signature = self._extract_signature(node, source_bytes)
+        base_classes = self._extract_base_classes(node, source_bytes)
 
         return Symbol(
             name=name,
@@ -110,7 +111,38 @@ class PythonParser(LanguageParser):
             language="python",
             parent_symbol=parent_class,
             complexity=1,
+            base_classes=base_classes,
         )
+
+    def _extract_base_classes(self, node: Any, source_bytes: bytes) -> list[str]:
+        """
+        Phase 4.1 (roadmap §37 item 4.1: "Base-class/inheritance
+        extraction (Python + JS/TS)"). `class_definition`'s
+        `superclasses` field is the `argument_list` in `class Foo(Base,
+        pkg.Mixin, metaclass=Meta):` -- confirmed via a direct tree-
+        sitter grammar probe during this milestone's own design audit.
+
+        Keeps `identifier` (`Base`) and `attribute` (`pkg.Mixin`, a
+        dotted/qualified name) nodes -- the only two node types that can
+        actually name a base class in this grammar. Deliberately
+        EXCLUDES `keyword_argument` (e.g. `metaclass=Meta`) -- not a
+        base class -- and punctuation/commas. Returns the raw text
+        exactly as written; RESOLVING each name to a real symbol is a
+        separate step performed by `CallGraphBuilder`, not here (see
+        `Symbol.base_classes`'s own docstring for why raw and resolved
+        are deliberately kept apart).
+        """
+        superclasses = node.child_by_field_name("superclasses")
+        if not superclasses:
+            return []
+
+        bases: list[str] = []
+        for child in superclasses.children:
+            if child.type in ("identifier", "attribute"):
+                bases.append(
+                    source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                )
+        return bases
 
     def _extract_docstring(self, node: Any, source_bytes: bytes) -> str | None:
         body_node = node.child_by_field_name("body")

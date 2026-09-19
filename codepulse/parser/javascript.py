@@ -154,6 +154,7 @@ class JavaScriptParser(LanguageParser):
         body_text = source_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
         docstring = self._extract_jsdoc(node, source_bytes)
         signature = self._extract_signature(node, source_bytes)
+        base_classes = self._extract_base_classes(node, source_bytes)
 
         return Symbol(
             name=name,
@@ -168,7 +169,67 @@ class JavaScriptParser(LanguageParser):
             language=self.language,
             parent_symbol=parent_class,
             complexity=1,
+            base_classes=base_classes,
         )
+
+    def _extract_base_classes(self, node: Any, source_bytes: bytes) -> list[str]:
+        """
+        Phase 4.1 (roadmap §37 item 4.1: "Base-class/inheritance
+        extraction (Python + JS/TS)"). Confirmed via direct tree-sitter
+        grammar probes during this milestone's own design audit that the
+        PLAIN JAVASCRIPT and TYPESCRIPT grammars shape `class_heritage`
+        differently:
+
+          - Plain JavaScript: `class_declaration -> class_heritage ->
+            (extends, <base expression>)` -- the base expression is a
+            DIRECT child of `class_heritage` (no wrapper node).
+          - TypeScript: `class_declaration -> class_heritage ->
+            extends_clause -> (extends, <base expression>)`, with an
+            optional SIBLING `implements_clause` (interface
+            implementation) inside `class_heritage` alongside
+            `extends_clause`. `implements_clause` is DELIBERATELY never
+            inspected here -- interface implementation is a different
+            relationship than base-class inheritance, out of this
+            milestone's exact scope (roadmap §37 item 4.1 names
+            "base-class/inheritance extraction," not "implements");
+            only ever looking WITHIN `extends_clause` when present is
+            what keeps `implements_clause` categorically unreachable
+            here, not an extra exclusion check.
+
+        `<base expression>` is either an `identifier` (`Base`) or a
+        `member_expression` (`ns.Base`, a dotted/namespace-qualified
+        base) -- the only two node types that can actually name a base
+        class in either grammar. Returns the raw text exactly as
+        written; resolution happens separately in `CallGraphBuilder`.
+        """
+        heritage = None
+        for child in node.children:
+            if child.type == "class_heritage":
+                heritage = child
+                break
+        if heritage is None:
+            return []
+
+        extends_clause = None
+        for child in heritage.children:
+            if child.type == "extends_clause":
+                extends_clause = child
+                break
+
+        # TypeScript wraps the base expression in extends_clause (and
+        # that is the ONLY place searched, so implements_clause -- a
+        # sibling of extends_clause, never a descendant of it -- is
+        # never reached). Plain JavaScript has no such wrapper -- the
+        # base expression is a direct child of class_heritage itself.
+        search_within = extends_clause if extends_clause is not None else heritage
+
+        bases: list[str] = []
+        for child in search_within.children:
+            if child.type in ("identifier", "member_expression", "type_identifier"):
+                bases.append(
+                    source_bytes[child.start_byte:child.end_byte].decode("utf-8", errors="replace")
+                )
+        return bases
 
     def _parse_method_definition(
         self, node: Any, source_bytes: bytes, file_path: str, parent_class: str | None

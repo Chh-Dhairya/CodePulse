@@ -82,15 +82,21 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the repository-
-        # isolation fix migration on top of Phase 3.4's rename)
+        # Verify revision recorded (head now includes Phase 4.1's
+        # base_classes/relationship_type migration on top of the
+        # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "2cd38eb12a7e"
+        assert current_rev == "135a7b064ea7"
 
         # Verify the isolation-fix column exists on call_edges
         call_edge_cols = {col["name"] for col in insp.get_columns("call_edges")}
         assert "repo_id" in call_edge_cols
         assert "confidence" in call_edge_cols
+
+        # Verify Phase 4.1's additive columns exist
+        assert "relationship_type" in call_edge_cols
+        symbol_cols = {col["name"] for col in insp.get_columns("symbols")}
+        assert "base_classes" in symbol_cols
 
         # Verify columns on symbols table
         symbol_cols = {col["name"]: col for col in insp.get_columns("symbols")}
@@ -235,10 +241,11 @@ def test_existing_database_stamping_scenario_2():
         # Stamp the existing database
         stamp_database(db_url=db_url, revision="head")
 
-        # Verify alembic_version is now recorded (head now includes the
-        # repository-isolation fix migration on top of Phase 3.4's rename)
+        # Verify alembic_version is now recorded (head now includes Phase
+        # 4.1's base_classes/relationship_type migration on top of the
+        # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "2cd38eb12a7e"
+        assert current_rev == "135a7b064ea7"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
