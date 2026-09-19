@@ -207,9 +207,13 @@ class IndexingEngine:
         pre-Phase-3.1 (always-full) run. This is disclosed, not silently
         patched over: full call-graph completeness for incremental runs
         is a best-effort, single-process-lifetime enhancement, not a
-        durable guarantee -- true incremental *graph* maintenance across
-        restarts is roadmap item 3.5 (local BFS incremental graph
-        update), explicitly out of this milestone's scope.
+        durable guarantee. Phase 3.5's own "local BFS incremental graph
+        update" (implemented -- see `_persist_call_graph_edges`) fixes
+        the DURABLE `CallEdge` table's update strategy, not this: the
+        in-memory graph cache's restart-survivability remains exactly
+        this same best-effort, single-process-lifetime guarantee,
+        unchanged by that milestone -- this guard is still needed and
+        still correct after it.
         """
         from codepulse.config import get_settings
 
@@ -313,7 +317,9 @@ class IndexingEngine:
         )
 
     @staticmethod
-    def _doc_ids_for_file(session, repo_id: int, fm: FileModel) -> tuple[list[str], list[str]]:
+    def _doc_ids_for_file(
+        session, repo_id: int, fm: FileModel
+    ) -> tuple[list[str], list[str], list[tuple[str, str]]]:
         """
         Phase 3.1/3.2 -- computes the exact `BM25Index`/`VectorIndex`
         `doc_id` strings for every symbol currently associated with the
@@ -324,18 +330,26 @@ class IndexingEngine:
         re-keys them to a new path instead), since both need the exact
         same doc_id-reconstruction logic, computed against the file's
         CURRENT (pre-change) `path`.
+
+        Also returns each symbol's `(file_path, symbol_name)` key
+        (Phase 3.5: fed into the call-graph incremental-update BFS --
+        see `_persist_call_graph_edges`'s own docstring for why the
+        caller needs to know exactly which symbol identities are about
+        to stop existing under their current path).
         """
         bm25_doc_ids: list[str] = []
         vector_doc_ids: list[str] = []
+        symbol_keys: list[tuple[str, str]] = []
         symbol_rows = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
         for sm in symbol_rows:
             bm25_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}")
+            symbol_keys.append((fm.path, sm.name))
             embedding_rows = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
             for em in embedding_rows:
                 vector_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}::{em.chunk_index}")
-        return bm25_doc_ids, vector_doc_ids
+        return bm25_doc_ids, vector_doc_ids, symbol_keys
 
-    def _purge_stale_entries(self, repo_id: int, relpaths: list[str]) -> None:
+    def _purge_stale_entries(self, repo_id: int, relpaths: list[str]) -> set[tuple[str, str]]:
         """
         Phase 3.1 -- removes the stale `File`/`Symbol` (cascading to
         `Embedding`, per the existing schema's `ON DELETE CASCADE`) rows
@@ -368,9 +382,16 @@ class IndexingEngine:
         A relpath with no existing rows (a never-before-indexed path, the
         common case for newly-*added* files) is a safe no-op, matching
         `remove_repo`/`remove_docs`'s own no-op-safety precedent.
+
+        Returns the `(file_path, symbol_name)` key for every symbol that
+        was deleted (Phase 3.5: fed into `_persist_call_graph_edges`'s
+        incremental BFS -- a deleted symbol's inbound call-graph edges,
+        recorded from unrelated, unchanged files, must be found and
+        corrected too, not left pointing at a symbol that no longer
+        exists).
         """
         if not relpaths:
-            return
+            return set()
 
         session = self.storage.get_session()
         try:
@@ -382,10 +403,12 @@ class IndexingEngine:
             )
             bm25_doc_ids: list[str] = []
             vector_doc_ids: list[str] = []
+            removed_symbol_keys: set[tuple[str, str]] = set()
             for fm in file_rows:
-                fm_bm25_ids, fm_vector_ids = self._doc_ids_for_file(session, repo_id, fm)
+                fm_bm25_ids, fm_vector_ids, fm_symbol_keys = self._doc_ids_for_file(session, repo_id, fm)
                 bm25_doc_ids.extend(fm_bm25_ids)
                 vector_doc_ids.extend(fm_vector_ids)
+                removed_symbol_keys.update(fm_symbol_keys)
 
             for fm in file_rows:
                 session.delete(fm)
@@ -404,7 +427,9 @@ class IndexingEngine:
         for relpath in relpaths:
             self.parse_results.pop(f"{repo_id}::{relpath}", None)
 
-    def _rekey_renamed_files(self, repo_id: int, renamed_pairs: list[tuple[str, str]]) -> None:
+        return removed_symbol_keys
+
+    def _rekey_renamed_files(self, repo_id: int, renamed_pairs: list[tuple[str, str]]) -> set[tuple[str, str]]:
         """
         Phase 3.2 (roadmap §37 item 3.2: "Rename/move detection + symbol
         re-keying"; §9: "re-key existing Symbol/Embedding rows to the
@@ -448,13 +473,16 @@ class IndexingEngine:
         file already behaves today -- a pre-existing Phase 0.4 limitation
         (no `(name, type)`-based, start_line-independent matching exists
         anywhere in this codebase yet), not something this milestone
-        newly introduces or is required to fix. `CallEdge` rows (named
-        `DependencyModel` before Phase 3.4) recorded before the rename
-        also keep referencing the OLD path string (call graph edges are
-        never deduped/corrected across a rename, or across any other
-        kind of re-index -- a pre-existing gap explicitly assigned to
-        roadmap items 3.4/3.5's "Call graph
-        updates" work, not 3.2's).
+        newly introduces or is required to fix.
+
+        Returns the OLD `(old_path, symbol_name)` key for every symbol
+        in every renamed file (Phase 3.5: fed into
+        `_persist_call_graph_edges`'s incremental BFS -- a symbol whose
+        FILE moved is, from the perspective of any OTHER, unrelated
+        caller's already-persisted `CallEdge` row, indistinguishable
+        from one that simply disappeared: that row's `target_file`
+        still says the OLD path, and must be found and corrected, not
+        left pointing at a path that no longer holds that symbol).
 
         Conservative fallback (matching the roadmap's own risk-register
         mitigation: "fallback to delete+recreate rather than a risky
@@ -465,8 +493,9 @@ class IndexingEngine:
         is already part of `changed_relpaths` regardless.
         """
         if not renamed_pairs:
-            return
+            return set()
 
+        removed_symbol_keys: set[tuple[str, str]] = set()
         for old_path, new_path in renamed_pairs:
             session = self.storage.get_session()
             try:
@@ -485,7 +514,8 @@ class IndexingEngine:
                     )
                     continue
 
-                bm25_doc_ids, vector_doc_ids = self._doc_ids_for_file(session, repo_id, fm)
+                bm25_doc_ids, vector_doc_ids, symbol_keys = self._doc_ids_for_file(session, repo_id, fm)
+                removed_symbol_keys.update(symbol_keys)
                 fm.path = new_path
                 session.commit()
             finally:
@@ -501,9 +531,11 @@ class IndexingEngine:
                 self.symbol_repo_map.pop(doc_id, None)
             self.parse_results.pop(f"{repo_id}::{old_path}", None)
 
+        return removed_symbol_keys
+
     def _diff_and_purge_file_symbols(
         self, repo_id: int, rel_path: str, new_symbols: list[Symbol]
-    ) -> set[int]:
+    ) -> tuple[set[int], set[tuple[str, str]]]:
         """
         Phase 3.3 (roadmap §37 item 3.3: "Symbol-level body_hash
         comparison to skip unchanged embeddings"; §9: "within a changed
@@ -566,8 +598,18 @@ class IndexingEngine:
         regardless of body content, so "leave unchanged symbols' doc_ids
         alone" does not apply there; `_rekey_renamed_files` already
         handles that case's own (whole-file) doc_id purge correctly.
+
+        Also returns the `(rel_path, symbol_name)` key for every symbol
+        that DISAPPEARED (case 2 above) -- Phase 3.5: fed into
+        `_persist_call_graph_edges`'s incremental BFS, the same reason
+        `_purge_stale_entries`/`_rekey_renamed_files` return theirs. A
+        symbol whose `body_hash` merely changed (case 3) does NOT need
+        its key returned here -- its `(file_path, name)` identity is
+        unchanged, so it's already covered by the caller's own "every
+        symbol in `all_symbols` not in `unchanged_ids`" pass.
         """
         unchanged_ids: set[int] = set()
+        disappeared_keys: set[tuple[str, str]] = set()
         bm25_doc_ids_to_purge: list[str] = []
         vector_doc_ids_to_purge: list[str] = []
 
@@ -580,7 +622,7 @@ class IndexingEngine:
                 .first()
             )
             if fm is None:
-                return unchanged_ids  # brand new file -- nothing to compare against
+                return unchanged_ids, disappeared_keys  # brand new file -- nothing to compare against
 
             existing_by_key: dict[tuple[str, int], SymbolModel] = {
                 (sm.name, sm.start_line): sm
@@ -611,6 +653,7 @@ class IndexingEngine:
             disappeared = [sm for sm in existing_by_key.values() if sm.id not in matched_existing_ids]
             for sm in disappeared:
                 bm25_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sm.name}")
+                disappeared_keys.add((rel_path, sm.name))
                 embedding_rows = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
                 for em in embedding_rows:
                     vector_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sm.name}::{em.chunk_index}")
@@ -630,7 +673,7 @@ class IndexingEngine:
             self.symbols_by_id.pop(doc_id, None)
             self.symbol_repo_map.pop(doc_id, None)
 
-        return unchanged_ids
+        return unchanged_ids, disappeared_keys
 
     def _record_snapshot(self, repo_id: int, repo_path: str) -> None:
         """
@@ -755,6 +798,14 @@ class IndexingEngine:
         # False`) leaves `all_files` untouched and skips this block
         # entirely, exactly matching every pre-Phase-3.1 run's behavior.
         renamed_new_paths: set[str] = set()
+        # Phase 3.5: `(file_path, symbol_name)` identity of every symbol
+        # that stopped existing under that identity this run (deleted,
+        # renamed-within-a-file, or moved to a new path) -- accumulated
+        # here and fed into `_persist_call_graph_edges`'s incremental
+        # BFS (see that method's own docstring). Populated below by
+        # `_rekey_renamed_files`, `_purge_stale_entries`, and (per-file,
+        # inside the parse loop) `_diff_and_purge_file_symbols`.
+        removed_symbol_keys: set[tuple[str, str]] = set()
         if incremental_plan.is_incremental and incremental_plan.changed_relpaths is not None:
             changed_set = incremental_plan.changed_relpaths
             all_files = [
@@ -771,7 +822,7 @@ class IndexingEngine:
             )
             # Phase 3.2: re-key renamed files' EXISTING File/Symbol/
             # Embedding rows to their new path FIRST.
-            self._rekey_renamed_files(repo_id, incremental_plan.renamed)
+            removed_symbol_keys |= self._rekey_renamed_files(repo_id, incremental_plan.renamed)
             renamed_new_paths = {new for _, new in incremental_plan.renamed}
             # Phase 3.3: deleted files are still handled here, file-
             # granularity, exactly as Phase 3.1 established (nothing
@@ -787,7 +838,7 @@ class IndexingEngine:
             # need touching at all. Added files never needed this
             # (nothing exists yet to purge) either way.
             stale_paths = sorted(set(incremental_plan.deleted_relpaths))
-            self._purge_stale_entries(repo_id, stale_paths)
+            removed_symbol_keys |= self._purge_stale_entries(repo_id, stale_paths)
         elif incremental_plan.reason:
             logger.info("Full re-index for repo_id=%s: %s", repo_id, incremental_plan.reason)
 
@@ -860,9 +911,11 @@ class IndexingEngine:
                 # non-incremental run both safely no-op here (nothing to
                 # compare against / not called at all, respectively).
                 if incremental_plan.is_incremental and rel_path not in renamed_new_paths:
-                    unchanged_symbol_ids |= self._diff_and_purge_file_symbols(
+                    file_unchanged_ids, file_disappeared_keys = self._diff_and_purge_file_symbols(
                         repo_id, rel_path, parse_res.symbols
                     )
+                    unchanged_symbol_ids |= file_unchanged_ids
+                    removed_symbol_keys |= file_disappeared_keys
 
                 for sym in parse_res.symbols:
                     all_symbols.append(sym)
@@ -899,10 +952,14 @@ class IndexingEngine:
         # covers this run's changed/added files -- building the call
         # graph from that alone would silently regress completeness
         # (edges from every unchanged file would vanish from
-        # `self.call_graphs[repo_id]`). To avoid that regression without
-        # doing roadmap item 3.5's job (local BFS incremental graph
-        # update, a genuinely different, deferred feature), merge in this
-        # engine instance's own cached `FileParseResult`s (populated by
+        # `self.call_graphs[repo_id]`). This IN-MEMORY graph is still a
+        # full rebuild from merged parse data every run (cheap -- no
+        # embedding involved), NOT the "recompute only what changed"
+        # BFS Phase 3.5 implements -- that operates one layer down, at
+        # the DURABLE `CallEdge` persistence step (`_persist_call_graph_
+        # edges`), deciding which DB rows to touch from THIS complete,
+        # freshly (re)built in-memory graph. Merge in this engine
+        # instance's own cached `FileParseResult`s (populated by
         # every parse, this run and prior ones, keyed by
         # "{repo_id}::{rel_path}") for every currently-existing,
         # unchanged file. `_plan_incremental_run`'s own
@@ -1030,6 +1087,20 @@ class IndexingEngine:
 
         self.bm25_index.build()
 
+        # Phase 3.5 (roadmap §37 item 3.5: "Local BFS incremental graph
+        # update"): the complete set of symbol identities that stopped
+        # existing under their PRIOR (file_path, name) this run --
+        # every disappeared/renamed-away key already accumulated above,
+        # plus every symbol in `all_symbols` that wasn't recognized as
+        # byte-identical (i.e. every genuinely new-or-changed symbol,
+        # under its CURRENT identity -- stable across a body-only
+        # change, so "current" and "prior" are the same key for that
+        # case). Passed to `_persist_to_db` -> `_persist_call_graph_edges`
+        # to decide exactly which `CallEdge` rows need recomputing.
+        changed_symbol_keys = removed_symbol_keys | {
+            (sym.file_path, sym.name) for sym in all_symbols if id(sym) not in unchanged_symbol_ids
+        }
+
         # 6. Save to Database
         stats = self._persist_to_db(
             repo_name=repo_name,
@@ -1038,6 +1109,8 @@ class IndexingEngine:
             all_symbols=all_symbols,
             all_chunks=all_chunks,
             chunk_embeddings=chunk_embeddings,
+            is_incremental=incremental_plan.is_incremental,
+            changed_symbol_keys=changed_symbol_keys,
         )
 
         # Phase 3.1: record this run's snapshot (commit_sha + embedding
@@ -1074,6 +1147,141 @@ class IndexingEngine:
             "symbols_skipped_unchanged": len(unchanged_symbol_ids),
         }
 
+    def _persist_call_graph_edges(
+        self,
+        session,
+        repo_id: int,
+        is_incremental: bool,
+        changed_symbol_keys: set[tuple[str, str]],
+    ) -> None:
+        """
+        Phase 3.5 (roadmap §37 item 3.5: "Local BFS incremental graph
+        update"; §9: "rather than rebuilding the whole graph, recompute
+        only edges whose *source* symbol is in the changed set, plus a
+        local BFS one hop out to catch edges whose *target* changed (a
+        symbol being renamed/deleted must have inbound edges from
+        unrelated files corrected too)").
+
+        Replaces the prior behavior -- every run unconditionally
+        appending every edge in `self.call_graph.edges` -- which is
+        exactly the long-disclosed, previously-deferred gap every
+        milestone since Phase 0.4 has pointed at this one to fix:
+        "CallEdge rows still duplicate on every re-index." Uses
+        `CallEdge.repo_id` (added by the repository-isolation fix that
+        preceded this milestone) to scope every delete precisely to
+        this repository -- nothing here can touch another repository's
+        rows even by accident.
+
+        FULL run (`is_incremental=False`): every existing `CallEdge` row
+        for this `repo_id` is deleted, then the complete fresh set from
+        `self.call_graph.edges` is inserted -- a full, correct,
+        one-time replace. Mirrors `BM25Index.remove_repo`'s existing
+        full-run pattern (Phase 2.1), which `CallEdge` could not follow
+        until it had a `repo_id` to scope the delete by.
+
+        INCREMENTAL run: a genuinely surgical update, not a full
+        rebuild, matching §9's literal recompute-only-what-changed
+        design:
+          1. Delete every existing row whose `(source_file,
+             source_symbol_name)` is in `changed_symbol_keys` -- these
+             are about to be replaced by a fresh recompute of exactly
+             that symbol's current outgoing calls.
+          2. "Local BFS one hop out": query the REMAINING rows (after
+             step 1) for this repo whose `(target_file,
+             target_symbol_name)` is in `changed_symbol_keys` -- these
+             belong to OTHER, unrelated (possibly unchanged-this-run)
+             symbols that call something which just changed, was
+             renamed, or disappeared. Their own `(source_file,
+             source_symbol_name)` is collected as `one_hop_keys` and
+             those rows are deleted too, to be recomputed fresh in step
+             3 -- this is what "a symbol being renamed/deleted must
+             have inbound edges from unrelated files corrected too"
+             concretely means here: the caller's own edge, freshly
+             re-derived from `self.call_graph` (which is guaranteed
+             complete for this repository -- built from every file's
+             parse result, cached or freshly reparsed, per Phase 3.1's
+             own cache-completeness design -- so the caller's file
+             does NOT need to have been reparsed this run for its edge
+             to be correctly recomputed), will naturally reflect the
+             correction (e.g. downgrading to `"unresolved"` if the
+             callee it used to resolve to no longer exists under that
+             identity).
+          3. Insert every edge in `self.call_graph.edges` whose
+             `(source_file, source_symbol_name)` is in
+             `changed_symbol_keys | one_hop_keys`.
+
+        A symbol whose file was neither changed nor a one-hop neighbor
+        of anything changed is completely untouched -- its existing,
+        already-correct `CallEdge` rows are left exactly as they were,
+        avoiding both the accumulation problem and any unnecessary
+        rewrite.
+        """
+        if not self.call_graph:
+            return
+
+        if not is_incremental:
+            session.query(CallEdge).filter(CallEdge.repo_id == repo_id).delete(synchronize_session=False)
+            for edge in self.call_graph.edges:
+                session.add(CallEdge(
+                    repo_id=repo_id,
+                    source_symbol_name=edge.source_symbol_name,
+                    source_file=edge.source_file,
+                    target_symbol_name=edge.target_symbol_name,
+                    target_file=edge.target_file,
+                    call_count=edge.call_count,
+                    confidence=edge.confidence,
+                ))
+            return
+
+        if not changed_symbol_keys:
+            # An incremental run with an empty changeset (e.g. no
+            # changes since the last indexed commit) -- nothing to
+            # recompute, nothing to touch.
+            return
+
+        for file_path, name in changed_symbol_keys:
+            session.query(CallEdge).filter(
+                CallEdge.repo_id == repo_id,
+                CallEdge.source_file == file_path,
+                CallEdge.source_symbol_name == name,
+            ).delete(synchronize_session=False)
+
+        one_hop_keys: set[tuple[str, str]] = set()
+        for file_path, name in changed_symbol_keys:
+            callers = (
+                session.query(CallEdge.source_file, CallEdge.source_symbol_name)
+                .filter(
+                    CallEdge.repo_id == repo_id,
+                    CallEdge.target_file == file_path,
+                    CallEdge.target_symbol_name == name,
+                )
+                .all()
+            )
+            for src_file, src_name in callers:
+                if (src_file, src_name) not in changed_symbol_keys:
+                    one_hop_keys.add((src_file, src_name))
+
+        for file_path, name in one_hop_keys:
+            session.query(CallEdge).filter(
+                CallEdge.repo_id == repo_id,
+                CallEdge.source_file == file_path,
+                CallEdge.source_symbol_name == name,
+            ).delete(synchronize_session=False)
+
+        recompute_keys = changed_symbol_keys | one_hop_keys
+        for edge in self.call_graph.edges:
+            if (edge.source_file, edge.source_symbol_name) not in recompute_keys:
+                continue
+            session.add(CallEdge(
+                repo_id=repo_id,
+                source_symbol_name=edge.source_symbol_name,
+                source_file=edge.source_file,
+                target_symbol_name=edge.target_symbol_name,
+                target_file=edge.target_file,
+                call_count=edge.call_count,
+                confidence=edge.confidence,
+            ))
+
     def _persist_to_db(
         self,
         repo_name: str,
@@ -1082,9 +1290,16 @@ class IndexingEngine:
         all_symbols: list[Symbol],
         all_chunks: list[CodeChunk],
         chunk_embeddings: list[tuple[Symbol, CodeChunk, np.ndarray]] | None = None,
+        is_incremental: bool = False,
+        changed_symbol_keys: set[tuple[str, str]] | None = None,
     ) -> dict[str, int]:
         """
         Persists repository hierarchy to the database.
+
+        `is_incremental`/`changed_symbol_keys` (Phase 3.5, default to a
+        safe full-rebuild for any caller that doesn't pass them, e.g. a
+        pre-existing direct test call) drive `_persist_call_graph_edges`
+        -- see that method's own docstring.
 
         Phase 0.3 behavior (Repository/File upsert with content_hash):
           - Repository rows are upserted by natural key `url` -- the same
@@ -1353,37 +1568,16 @@ class IndexingEngine:
 
             session.flush()
 
-            # Persist call graph edges (Phase 3.4: now carrying a real,
-            # computed `confidence` tier per edge -- see
-            # CallGraphBuilder._build_graph. Still NOT upserted/deduped
-            # across re-indexes -- rows simply accumulate every run, a
-            # pre-existing, disclosed Phase 0.4 limitation this milestone
-            # does not change; recomputing only the edges touching
-            # changed symbols is roadmap item 3.5's job, not 3.4's.
-            #
-            # Post-Phase-3.4 isolation fix: every row now carries
-            # `repo_id=repo_record.id` -- the repository this exact
-            # `_persist_to_db` call is persisting, which is guaranteed to
-            # be the SAME repository `self.call_graph` was just built for
-            # earlier in this same `index_directory()` invocation (that
-            # alias is only ever read-then-written within one call, never
-            # across two interleaved ones). Without this, `CallEdge` rows
-            # had no repository association at all, and callers filtering
-            # by symbol name alone (e.g. GET /v1/symbols/{id}) could
-            # receive an unrelated repository's edges -- a real, confirmed
-            # cross-repository data leak, fixed here at the source.
-            if self.call_graph:
-                for edge in self.call_graph.edges:
-                    ce = CallEdge(
-                        repo_id=repo_record.id,
-                        source_symbol_name=edge.source_symbol_name,
-                        source_file=edge.source_file,
-                        target_symbol_name=edge.target_symbol_name,
-                        target_file=edge.target_file,
-                        call_count=edge.call_count,
-                        confidence=edge.confidence,
-                    )
-                    session.add(ce)
+            # Persist call graph edges. Phase 3.5 (roadmap §37 item 3.5:
+            # "Local BFS incremental graph update") -- see
+            # `_persist_call_graph_edges`'s own docstring for the full
+            # design; this finally closes the long-disclosed "CallEdge
+            # rows duplicate/accumulate on every re-index" gap (Phase
+            # 0.4) for both full and incremental runs, using the
+            # `repo_id` column the isolation fix added.
+            self._persist_call_graph_edges(
+                session, repo_record.id, is_incremental, changed_symbol_keys or set()
+            )
 
             session.commit()
             return {

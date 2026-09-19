@@ -116,12 +116,17 @@ class CallEdge(Base):
     repository's next re-index recomputes and persists a real value --
     see that migration's own docstring.
 
-    Like its `DependencyModel` predecessor, rows are still NOT upserted
-    or deduplicated across re-indexes -- they simply accumulate every
-    run (a pre-existing, disclosed Phase 0.4 limitation, unchanged by
-    this milestone). Actually avoiding that accumulation by recomputing
-    only the edges touching changed symbols is roadmap item 3.5's job
-    ("local BFS-based incremental graph updates"), not this one's.
+    RESOLVED by Phase 3.5 ("local BFS-based incremental graph
+    updates"): rows are no longer blindly appended every run. A full
+    run replaces every row for the repository; an incremental run
+    deletes and recomputes only the rows whose source symbol changed
+    this run, plus (the "local BFS one hop out") any OTHER symbol's
+    row whose target was a symbol that changed, was renamed, or
+    disappeared -- see `IndexingEngine._persist_call_graph_edges`'s own
+    docstring for the full algorithm. Before Phase 3.5 (and under the
+    `DependencyModel` name before that), rows simply accumulated
+    forever every run -- a long-disclosed Phase 0.4 limitation, now
+    closed.
 
     `repo_id` (post-Phase-3.4 isolation fix, migration `2cd38eb12a7e`):
     every row written by `IndexingEngine.
