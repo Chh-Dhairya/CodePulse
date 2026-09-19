@@ -1869,3 +1869,77 @@ class IndexingEngine:
                 graph_scores=graph_scores,
                 top_k=limit,
             )
+
+    def analyze_impact(
+        self, symbol_name: str, file_path: str, repo_id: int, max_depth: int = 3
+    ) -> dict[str, Any]:
+        """
+        Phase 4.2 (roadmap §37 item 4.2 "Impact analysis: direct vs.
+        transitive bucketing"; §11 "Impact analysis output"; DoD:
+        "impact analysis output clearly separates confidence tiers and
+        depth buckets"). The shared intelligence-core impact-analysis
+        function -- REST and CLI both call this directly instead of each
+        independently calling `CallGraphBuilder.get_callers`/
+        `get_callees` and reimplementing bucketing (the architecture
+        violation this milestone's own read-only audit found: graph
+        logic embedded directly in the FastAPI route, and a second,
+        independent copy in the CLI command).
+
+        **CALLS ONLY** -- an explicit, approved architectural decision
+        (see CODEPULSE_PROGRESS.md's Phase 4.2 entry): traverses only
+        `CallGraphBuilder`'s calls-only adjacency via `get_callers`/
+        `get_callees`, which never read `inheritance_adjacency`/
+        `reverse_inheritance_adjacency` (Phase 4.1's own separation
+        invariant). Inheritance-aware impact analysis is explicitly
+        deferred, not part of this milestone.
+
+        **Repository isolation**: `repo_id` must be the repository the
+        REQUESTED symbol actually belongs to (the caller resolves this
+        from the symbol's own file, never from an unrelated/client-
+        suppliable parameter) -- looks up `self.call_graphs.get(repo_id)`
+        (the correctly-scoped, per-repository dict), never the singular,
+        "most recently indexed" `self.call_graph` alias. A cold cache
+        (e.g. immediately after a process restart, before any
+        `index_directory()` call -- `self.call_graphs` does not survive
+        restart) degrades to empty callers/callees, exactly like the
+        pre-4.2 REST handler's own fallback, never an error.
+
+        **Direct/transitive buckets** (§11's own literal definition, no
+        additional buckets): `direct` = `depth == 1`, `transitive` =
+        `depth >= 2`, applied symmetrically to both callers and callees
+        (the pre-4.2 endpoint only ever bucketed callers, as counts, and
+        left callees entirely unbucketed). Each entry already carries
+        `confidence` (threaded through by `get_callers`/`get_callees`
+        themselves, reusing the existing high/low/unresolved
+        vocabulary) and the two lists are already deterministically
+        ordered by those methods -- this method does no additional
+        sorting or filtering of its own.
+
+        The four legacy fields (`direct_callers`, `indirect_callers`,
+        `call_chain`, `dependencies`) are computed identically to their
+        pre-4.2 values, from the SAME underlying `callers`/`callees`
+        lists the new bucketed fields are built from -- this method is a
+        strict superset of the old inline REST logic, not a redesign,
+        guaranteeing zero behavioral drift for existing consumers/tests.
+        """
+        repo_call_graph = self.call_graphs.get(repo_id)
+        if repo_call_graph:
+            callers = repo_call_graph.get_callers(symbol_name, file_path, max_depth=max_depth)
+            callees = repo_call_graph.get_callees(symbol_name, file_path, max_depth=max_depth)
+        else:
+            callers, callees = [], []
+
+        direct_callers = [c for c in callers if c.get("depth") == 1]
+        indirect_callers = [c for c in callers if c.get("depth", 0) > 1]
+        direct_callees = [c for c in callees if c.get("depth") == 1]
+        transitive_callees = [c for c in callees if c.get("depth", 0) > 1]
+
+        return {
+            "symbol": symbol_name,
+            "direct_callers": len(direct_callers),
+            "indirect_callers": len(indirect_callers),
+            "call_chain": callers,
+            "dependencies": callees,
+            "callers": {"direct": direct_callers, "transitive": indirect_callers},
+            "callees": {"direct": direct_callees, "transitive": transitive_callees},
+        }

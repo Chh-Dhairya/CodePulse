@@ -464,29 +464,20 @@ def analyze_impact(
             raise HTTPException(status_code=404, detail="Symbol not found")
         auth.authorize_repository(sym.file.repo_id)
 
-        # Repository-isolation fix: `indexing_engine.call_graph` is the
-        # "most recently indexed repository" singular alias (Phase 0.6),
-        # which in a long-lived, multi-repository server process is NOT
-        # necessarily this symbol's own repository -- using it here would
-        # traverse whatever repository happened to be indexed last,
-        # either silently returning another repository's callers/callees
-        # or missing this one's entirely. `indexing_engine.call_graphs`
-        # (per-repo, keyed by `repo_id`) is the correctly-scoped
-        # structure this endpoint should have used from the start.
-        repo_call_graph = indexing_engine.call_graphs.get(sym.file.repo_id)
-        if repo_call_graph:
-            callers = repo_call_graph.get_callers(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
-            callees = repo_call_graph.get_callees(sym.name, sym.file.path if sym.file else "", max_depth=req.depth)
-        else:
-            callers, callees = [], []
-
-        return {
-            "symbol": sym.name,
-            "direct_callers": len([c for c in callers if c.get("depth") == 1]),
-            "indirect_callers": len([c for c in callers if c.get("depth", 0) > 1]),
-            "call_chain": callers,
-            "dependencies": callees,
-        }
+        # Phase 4.2 (roadmap §37 item 4.2): graph analysis moved out of
+        # this route and into the shared `IndexingEngine.analyze_impact`
+        # intelligence-core method (this milestone's own audit found the
+        # bucketing logic embedded directly in this handler, duplicated a
+        # third time in the CLI). `sym.file.repo_id` -- resolved from the
+        # REQUESTED symbol's own file, never a client-suppliable
+        # parameter -- is passed through explicitly so the shared method
+        # looks up the correctly-scoped `indexing_engine.call_graphs`
+        # (per-repo) rather than the singular, "most recently indexed"
+        # `indexing_engine.call_graph` alias (the same repository-
+        # isolation fix already applied here since the Phase 3.4 audit).
+        return indexing_engine.analyze_impact(
+            sym.name, sym.file.path if sym.file else "", sym.file.repo_id, max_depth=req.depth
+        )
     finally:
         session.close()
 

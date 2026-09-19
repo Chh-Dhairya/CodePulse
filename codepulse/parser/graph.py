@@ -98,12 +98,31 @@ class CallGraphBuilder:
     NOT be achieved by merging the two adjacency structures.
     """
 
+    # Phase 4.2 (roadmap §37 item 4.2; §11): deterministic ordering rule
+    # for traversal results, reusing §12's own stated convention for the
+    # adjacent `/v1/agent/context` bundle ("callers/callees... sorted by
+    # confidence then call-count") rather than inventing a new one.
+    # `None` (a legacy pre-Phase-3.4 row with no computed confidence,
+    # see `CallEdge`'s own docstring) sorts last -- known-good
+    # information before honestly-absent information, never fabricated.
+    _CONFIDENCE_SORT_RANK = {"high": 0, "low": 1, "unresolved": 2, None: 3}
+
     def __init__(self, parse_results: dict[str, FileParseResult] | list[FileParseResult]) -> None:
         self.resolver = ImportResolver(parse_results)
         self.edges: list[CallGraphEdge] = []
         # Adjacency lists for fast bidirectional traversal -- CALLS ONLY.
         self.adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         self.reverse_adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        # Phase 4.2: per-edge (confidence, call_count) index, keyed by the
+        # SAME (src_key, tgt_key) pairs used in `self.adjacency` -- CALLS
+        # ONLY, built in the same loop that populates `self.adjacency`
+        # (no second pass, no new traversal). `_build_graph`'s own
+        # `call_counts`/`call_confidence` dicts already guarantee exactly
+        # one edge per (src_key, tgt_key) pair, so this lookup is never
+        # ambiguous. Lets `get_callers`/`get_callees` attach each result's
+        # confidence and sort deterministically without a second graph
+        # traversal or a new confidence vocabulary.
+        self.edge_meta: dict[tuple[tuple[str, str], tuple[str, str]], tuple[Optional[str], int]] = {}
         # Phase 4.1: INHERITANCE ONLY -- deliberately separate structures,
         # never merged with the calls-only ones above. See this class's
         # own docstring for why.
@@ -201,6 +220,7 @@ class CallGraphBuilder:
                 tgt_key = (tgt_file or "", tgt_sym)
                 self.adjacency[src_key].add(tgt_key)
                 self.reverse_adjacency[tgt_key].add(src_key)
+                self.edge_meta[(src_key, tgt_key)] = (call_confidence[key], count)
 
             # Phase 4.1: resolve inheritance relationships for every
             # CLASS symbol in this file, reusing the SAME `import_map`/
@@ -237,9 +257,27 @@ class CallGraphBuilder:
                     self.reverse_inheritance_adjacency[tgt_key].add(src_key)
 
     def get_callees(self, symbol_name: str, file_path: str = "", max_depth: int = 3) -> list[dict]:
-        """Returns symbols called by the given symbol up to max_depth (downstream impact)."""
+        """
+        Returns symbols called by the given symbol up to max_depth
+        (downstream impact). CALLS ONLY -- traverses `self.adjacency`
+        exclusively, never `self.inheritance_adjacency` (Phase 4.1's own
+        separation invariant, unchanged by Phase 4.2).
+
+        Phase 4.2 (roadmap §37 item 4.2; §11): each result now also
+        carries `confidence` (looked up from `self.edge_meta`, the same
+        3-tier "high"/"low"/"unresolved" vocabulary already used
+        everywhere else -- no new vocabulary), and results are sorted
+        deterministically (confidence, then call_count descending, then
+        file, then symbol) so the same repository snapshot always
+        produces the same ordered list, regardless of process-local
+        Python set-iteration order. The BFS/visited-set mechanics
+        themselves are UNCHANGED from before this milestone -- still a
+        single traversal, still cycle-safe and deduplicated purely
+        through `visited`, still reporting each key's true shortest-path
+        depth (the first, and only, time it is ever enqueued).
+        """
         file_path = file_path.replace("\\", "/")
-        
+
         start_keys: list[tuple[str, str]] = []
         if file_path:
             start_keys.append((file_path, symbol_name))
@@ -265,17 +303,34 @@ class CallGraphBuilder:
                 if next_key not in visited:
                     visited.add(next_key)
                     tgt_file, tgt_sym = next_key
+                    confidence, call_count = self.edge_meta.get((curr_key, next_key), (None, 0))
                     results.append({
                         "symbol": tgt_sym,
                         "file": tgt_file if tgt_file else "external",
                         "depth": depth,
+                        "confidence": confidence,
+                        "_call_count": call_count,
                     })
                     queue.append((next_key, depth + 1))
 
-        return results
+        return self._sort_and_strip(results)
 
     def get_callers(self, symbol_name: str, file_path: str = "", max_depth: int = 3) -> list[dict]:
-        """Returns symbols that call the given symbol up to max_depth (upstream blast radius)."""
+        """
+        Returns symbols that call the given symbol up to max_depth
+        (upstream blast radius). CALLS ONLY -- traverses
+        `self.reverse_adjacency` exclusively, never
+        `self.reverse_inheritance_adjacency`.
+
+        Phase 4.2: same `confidence` + deterministic-ordering additions
+        as `get_callees` (see its docstring) -- each queued item now also
+        carries the key it directly calls (`points_to`), so the
+        confidence of THAT exact edge (caller -> points_to) can be looked
+        up from `self.edge_meta` at result-construction time. This is
+        the only change to the traversal's own bookkeeping; the
+        visited-set/queue mechanics, shortest-path depth assignment, and
+        cycle safety are otherwise identical to before this milestone.
+        """
         file_path = file_path.replace("\\", "/")
         candidate_keys: list[tuple[str, str]] = []
 
@@ -299,22 +354,47 @@ class CallGraphBuilder:
             for caller in self.reverse_adjacency.get(k, set()):
                 if caller not in visited:
                     visited.add(caller)
-                    queue.append((caller, 1))
+                    queue.append((caller, 1, k))
 
         results = []
         while queue:
-            curr_key, depth = queue.popleft()
+            curr_key, depth, points_to = queue.popleft()
             src_file, src_sym = curr_key
+            confidence, call_count = self.edge_meta.get((curr_key, points_to), (None, 0))
             results.append({
                 "symbol": src_sym,
                 "file": src_file,
                 "depth": depth,
+                "confidence": confidence,
+                "_call_count": call_count,
             })
 
             if depth < max_depth:
                 for next_caller in self.reverse_adjacency.get(curr_key, set()):
                     if next_caller not in visited:
                         visited.add(next_caller)
-                        queue.append((next_caller, depth + 1))
+                        queue.append((next_caller, depth + 1, curr_key))
 
+        return self._sort_and_strip(results)
+
+    def _sort_and_strip(self, results: list[dict]) -> list[dict]:
+        """
+        Phase 4.2 deterministic-ordering helper, shared by `get_callers`/
+        `get_callees`: sorts by (confidence, call_count descending, file,
+        symbol) -- reusing §12's own stated "sorted by confidence then
+        call-count" convention rather than inventing a new ranking -- and
+        strips the internal `_call_count` sort key before returning, so
+        the public result shape stays exactly `{symbol, file, depth,
+        confidence}`.
+        """
+        results.sort(
+            key=lambda r: (
+                self._CONFIDENCE_SORT_RANK.get(r["confidence"], 3),
+                -r["_call_count"],
+                r["file"],
+                r["symbol"],
+            )
+        )
+        for r in results:
+            del r["_call_count"]
         return results

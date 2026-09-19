@@ -197,7 +197,7 @@ def cmd_impact(args: argparse.Namespace) -> None:
     path = args.path
     symbol_name = args.symbol
     engine = IndexingEngine()
-    engine.index_directory(path)
+    result = engine.index_directory(path)
 
     if not engine.call_graph:
         console.print("[red]Call graph not available.[/red]")
@@ -205,21 +205,29 @@ def cmd_impact(args: argparse.Namespace) -> None:
 
     console.print(Panel(f"[bold magenta]Impact Analysis for symbol:[/bold magenta] [bold green]{symbol_name}[/bold green]"))
 
-    # Downstream callees (what this function calls)
-    callees = engine.call_graph.get_callees(symbol_name, "", max_depth=args.depth)
-    # Upstream callers (what functions call this function - blast radius)
-    callers = engine.call_graph.get_callers(symbol_name, "", max_depth=args.depth)
+    # Phase 4.2 (roadmap §37 item 4.2): redirected to the shared
+    # `IndexingEngine.analyze_impact` intelligence-core method instead of
+    # calling `CallGraphBuilder.get_callers`/`get_callees` directly (this
+    # milestone's own audit found that duplicated the REST route's
+    # identical logic a second time here). `result["repository_id"]` is
+    # already returned by `index_directory` above -- no new CLI feature
+    # or flag needed to plumb it through. The CLI's own presentation
+    # (this Rich `Tree`) is unchanged.
+    repository_id = result["repository_id"]
+    impact = engine.analyze_impact(symbol_name, "", repository_id, max_depth=args.depth)
+    callers = impact["call_chain"]
+    callees = impact["dependencies"]
 
     # Tree visualization
     tree = Tree(f"[bold yellow]🎯 Symbol: {symbol_name}[/bold yellow]")
 
     callers_branch = tree.add(f"[bold red]▲ Blast Radius (Upstream Callers - {len(callers)} found)[/bold red]")
     for c in callers:
-        callers_branch.add(f"[cyan]{c['symbol']}[/cyan] ({c['file']}) [dim]depth={c['depth']}[/dim]")
+        callers_branch.add(f"[cyan]{c['symbol']}[/cyan] ({c['file']}) [dim]depth={c['depth']}[/dim] [dim]confidence={c.get('confidence')}[/dim]")
 
     callees_branch = tree.add(f"[bold blue]▼ Dependencies (Downstream Callees - {len(callees)} found)[/bold blue]")
     for c in callees:
-        callees_branch.add(f"[cyan]{c['symbol']}[/cyan] ({c['file']}) [dim]depth={c['depth']}[/dim]")
+        callees_branch.add(f"[cyan]{c['symbol']}[/cyan] ({c['file']}) [dim]depth={c['depth']}[/dim] [dim]confidence={c.get('confidence')}[/dim]")
 
     console.print(tree)
     console.print()
