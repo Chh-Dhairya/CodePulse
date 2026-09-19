@@ -347,3 +347,167 @@ def test_a_call_edge_row_with_no_repo_id_is_invisible_to_every_repository(tmp_pa
         "an orphaned (repo_id=NULL) CallEdge row must never surface for any repository, "
         "including the one its source_file happens to also belong to"
     )
+
+
+# --- Phase 4.1 compatibility correction: GET /v1/symbols/{id} must stay
+# CALLS ONLY (roadmap §37 item 4.1/4.2 follow-up) -------------------------
+#
+# Phase 4.1 started persisting inheritance relationships
+# (`relationship_type="inherits"`) into the SAME `CallEdge` table this
+# endpoint already queried for ordinary calls. Without an explicit
+# `relationship_type == "calls"` filter, a base class's `called_by` (or
+# a subclass's `calls`) could silently include its subclasses (or base
+# classes), mislabeled as ordinary call relationships. These tests
+# reproduce that scenario directly and prove the endpoint's `called_by`/
+# `calls` fields remain calls-only.
+
+def _make_repo_with_inheritance_and_a_call(tmp_path, dirname="repo_inherit_and_call"):
+    """One repo containing BOTH an inheritance relationship (Dog(Animal))
+    and an ordinary call relationship (caller() -> helper()), so a
+    single fixture can prove calls still appear while inherits don't."""
+    repo = tmp_path / dirname
+    _write(
+        repo, "animals.py",
+        'class Animal:\n    """Base animal."""\n    pass\n\n\n'
+        'class Dog(Animal):\n    """A dog."""\n    pass\n',
+    )
+    _write(
+        repo, "mod.py",
+        'def helper():\n    """A helper."""\n    return 1\n\n\n'
+        'def caller():\n    """Calls helper."""\n    return helper()\n',
+    )
+    return str(repo)
+
+
+def test_get_symbol_details_calls_field_excludes_inheritance_edges(tmp_path, shared_embedder, monkeypatch):
+    """A subclass's `calls` field must NOT include its own base class,
+    even though Phase 4.1 persists that relationship in the same
+    `CallEdge` table (`relationship_type="inherits"`)."""
+    repo_path = _make_repo_with_inheritance_and_a_call(tmp_path)
+    storage = StorageManager(db_url=_db_url(tmp_path, "inherit_calls_field.db"))
+    engine = IndexingEngine(storage=storage, embedder=shared_embedder)
+    result = engine.index_directory(repo_path, repo_name="r", repo_url=repo_path)
+
+    from codepulse.storage.db import FileModel, SymbolModel
+    session = storage.get_session()
+    try:
+        dog_sym = session.query(SymbolModel).join(FileModel).filter(
+            FileModel.repo_id == result["repository_id"], SymbolModel.name == "Dog"
+        ).first()
+        symbol_id = dog_sym.id
+    finally:
+        session.close()
+
+    monkeypatch.setattr(app_module, "storage_manager", storage)
+    monkeypatch.setattr(app_module, "indexing_engine", engine)
+    client = TestClient(app)
+    headers = make_api_key_headers(storage, repository_ids=[result["repository_id"]])
+
+    response = client.get(f"/v1/symbols/{symbol_id}", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["calls"] == [], (
+        "Dog's inheritance edge to Animal must not appear in `calls` -- "
+        f"got {body['calls']!r}"
+    )
+
+
+def test_get_symbol_details_called_by_field_excludes_inheritance_edges(tmp_path, shared_embedder, monkeypatch):
+    """A base class's `called_by` field must NOT include its own
+    subclasses."""
+    repo_path = _make_repo_with_inheritance_and_a_call(tmp_path)
+    storage = StorageManager(db_url=_db_url(tmp_path, "inherit_called_by_field.db"))
+    engine = IndexingEngine(storage=storage, embedder=shared_embedder)
+    result = engine.index_directory(repo_path, repo_name="r", repo_url=repo_path)
+
+    from codepulse.storage.db import FileModel, SymbolModel
+    session = storage.get_session()
+    try:
+        animal_sym = session.query(SymbolModel).join(FileModel).filter(
+            FileModel.repo_id == result["repository_id"], SymbolModel.name == "Animal"
+        ).first()
+        symbol_id = animal_sym.id
+    finally:
+        session.close()
+
+    monkeypatch.setattr(app_module, "storage_manager", storage)
+    monkeypatch.setattr(app_module, "indexing_engine", engine)
+    client = TestClient(app)
+    headers = make_api_key_headers(storage, repository_ids=[result["repository_id"]])
+
+    response = client.get(f"/v1/symbols/{symbol_id}", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["called_by"] == [], (
+        "Animal's inheritance edge from Dog must not appear in `called_by` -- "
+        f"got {body['called_by']!r}"
+    )
+
+
+def test_get_symbol_details_ordinary_call_edges_still_appear_alongside_inheritance_data(tmp_path, shared_embedder, monkeypatch):
+    """The positive case, checked in the SAME repository as the two
+    negative tests above: an ordinary call relationship must still
+    surface correctly -- the inheritance filter must not overcorrect
+    into hiding real calls."""
+    repo_path = _make_repo_with_inheritance_and_a_call(tmp_path)
+    storage = StorageManager(db_url=_db_url(tmp_path, "inherit_positive_call.db"))
+    engine = IndexingEngine(storage=storage, embedder=shared_embedder)
+    result = engine.index_directory(repo_path, repo_name="r", repo_url=repo_path)
+
+    from codepulse.storage.db import FileModel, SymbolModel
+    session = storage.get_session()
+    try:
+        caller_sym = session.query(SymbolModel).join(FileModel).filter(
+            FileModel.repo_id == result["repository_id"], SymbolModel.name == "caller"
+        ).first()
+        symbol_id = caller_sym.id
+    finally:
+        session.close()
+
+    monkeypatch.setattr(app_module, "storage_manager", storage)
+    monkeypatch.setattr(app_module, "indexing_engine", engine)
+    client = TestClient(app)
+    headers = make_api_key_headers(storage, repository_ids=[result["repository_id"]])
+
+    response = client.get(f"/v1/symbols/{symbol_id}", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["calls"]) == 1
+    assert body["calls"][0]["symbol"] == "helper"
+
+
+def test_get_symbol_details_inheritance_isolation_does_not_leak_across_repositories(tmp_path, shared_embedder, monkeypatch):
+    """Two repositories both define an identically-named `Animal`/`Dog`
+    inheritance pair. Repo B's `Animal.called_by` must never show Repo
+    A's `Dog` (or vice versa) -- the same repository-isolation guarantee
+    already proven for ordinary calls must also hold now that inherits
+    rows share the same table and the same relationship_type filter."""
+    repo_a_path = _make_repo_with_inheritance_and_a_call(tmp_path, dirname="repo_a_inherit")
+    repo_b_path = _make_repo_with_inheritance_and_a_call(tmp_path, dirname="repo_b_inherit")
+    storage = StorageManager(db_url=_db_url(tmp_path, "inherit_isolation.db"))
+    engine = IndexingEngine(storage=storage, embedder=shared_embedder)
+    r_a = engine.index_directory(repo_a_path, repo_name="repo_a", repo_url=repo_a_path)
+    r_b = engine.index_directory(repo_b_path, repo_name="repo_b", repo_url=repo_b_path)
+
+    from codepulse.storage.db import FileModel, SymbolModel
+    session = storage.get_session()
+    try:
+        b_animal_sym = session.query(SymbolModel).join(FileModel).filter(
+            FileModel.repo_id == r_b["repository_id"], SymbolModel.name == "Animal"
+        ).first()
+        symbol_id = b_animal_sym.id
+    finally:
+        session.close()
+
+    monkeypatch.setattr(app_module, "storage_manager", storage)
+    monkeypatch.setattr(app_module, "indexing_engine", engine)
+    client = TestClient(app)
+    headers = make_api_key_headers(storage, repository_ids=[r_b["repository_id"]])
+
+    response = client.get(f"/v1/symbols/{symbol_id}", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["called_by"] == [], (
+        "repo B's Animal must show no subclasses from EITHER repo -- if repo A's Dog "
+        f"leaked across, or repo B's own Dog leaked through the inheritance filter, got {body['called_by']!r}"
+    )

@@ -353,16 +353,29 @@ def get_symbol_details(symbol_id: int, auth: AuthorizedKey = Depends(require_api
         # fix and could not be unambiguously backfilled) -- such a row
         # simply never matches this filter, so it's invisible here rather
         # than leaking; see CallEdge's own docstring.
+        #
+        # Phase 4.1 compatibility correction: Phase 4.1 started persisting
+        # inheritance relationships (`relationship_type="inherits"`) into
+        # this SAME `CallEdge` table. Without this filter, a base class's
+        # `called_by` (or a subclass's `calls`) would silently include its
+        # subclasses (or base classes), mislabeled as ordinary call
+        # relationships -- `called_by`/`calls` are documented, historical,
+        # calls-only fields; this endpoint's contract was never widened to
+        # include inheritance. Explicitly restricting to `"calls"` keeps
+        # this endpoint's semantics exactly what they were before Phase
+        # 4.1 introduced the second relationship type into this table.
         called_by = (
             session.query(CallEdge)
             .filter(CallEdge.target_symbol_name == sym.name)
             .filter(CallEdge.repo_id == sym.file.repo_id)
+            .filter(CallEdge.relationship_type == "calls")
             .all()
         )
         calls = (
             session.query(CallEdge)
             .filter(CallEdge.source_symbol_name == sym.name)
             .filter(CallEdge.repo_id == sym.file.repo_id)
+            .filter(CallEdge.relationship_type == "calls")
             .all()
         )
 
