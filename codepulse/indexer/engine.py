@@ -18,6 +18,7 @@ from codepulse.ingestion_safety import IngestionSafetyError
 from codepulse.models import FileParseResult, Symbol, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
+from codepulse.parser.module_graph import ModuleGraphBuilder
 from codepulse.search.bm25 import BM25Index
 from codepulse.search.ranker import HybridRanker, SearchResultItem
 from codepulse.search.vector import VectorIndex
@@ -1943,3 +1944,37 @@ class IndexingEngine:
             "callers": {"direct": direct_callers, "transitive": indirect_callers},
             "callees": {"direct": direct_callees, "transitive": transitive_callees},
         }
+
+    def analyze_module_structure(self, repo_id: int) -> ModuleGraphBuilder:
+        """
+        Phase 4.3 (roadmap §37 item 4.3 "Deterministic module-clustering
+        via import graph"; §11 "Architecture discovery"; §45 backlog
+        B18). Library/shared-core-only per this milestone's explicit
+        approved scope -- no REST route, CLI command, or MCP tool calls
+        this yet; a future one can, through this exact method, without
+        duplicating any of `ModuleGraphBuilder`'s own construction
+        logic.
+
+        Repository-scoped by the EXACT SAME pattern `index_directory`
+        already uses to build `self.call_graphs[repo_id]`: filters
+        `self.parse_results` (this engine's own cache, keyed
+        `"{repo_id}::{rel_path}"`) down to only this repository's own
+        files before constructing `ModuleGraphBuilder` -- isolation
+        holds by construction, not by a runtime filter inside the
+        analysis itself.
+
+        Computed fresh from the current in-memory snapshot on every
+        call -- no incremental-update machinery, no cross-call caching,
+        no persistence, per this milestone's explicit approved scope
+        ("compute module structure from the current repository
+        snapshot"). Returns an empty-graph `ModuleGraphBuilder` if this
+        repository has no parsed files cached yet (e.g. before its
+        first `index_directory()` call, or after a process restart --
+        `self.parse_results` does not survive one, matching
+        `self.call_graphs`'s own already-documented restart behavior).
+        """
+        prefix = f"{repo_id}::"
+        repo_parsed_files = [
+            cached for key, cached in self.parse_results.items() if key.startswith(prefix)
+        ]
+        return ModuleGraphBuilder(repo_parsed_files)

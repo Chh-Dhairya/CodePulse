@@ -43,6 +43,16 @@ dependencies = [
     # File Discovery (.gitignore / .codepulseignore pattern matching, Phase 0.8)
     "pathspec>=1.1.0,<1.2.0",
 
+    # Graph Analysis -- Phase 4.3 (roadmap §37 item 4.3: "Deterministic
+    # module-clustering via import graph"). Used for seeded Louvain
+    # community detection over the file-level import graph
+    # (`codepulse/parser/module_graph.py`). Already installed in this
+    # environment as `torch`'s own transitive dependency, but declared
+    # here explicitly rather than relied on implicitly -- this project's
+    # code now directly imports it, and a future `torch` version could
+    # drop or change that transitive requirement.
+    "networkx>=3.0,<4.0",
+
     # AI / Embeddings
     "sentence-transformers>=3.0.0,<3.1.0",
     "torch>=2.3.0,<2.4.0",
