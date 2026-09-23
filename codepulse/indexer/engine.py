@@ -1978,3 +1978,49 @@ class IndexingEngine:
             cached for key, cached in self.parse_results.items() if key.startswith(prefix)
         ]
         return ModuleGraphBuilder(repo_parsed_files)
+
+    def analyze_references(self, symbol_name: str, file_path: str, repo_id: int) -> dict[str, Any]:
+        """
+        Phase 4.4 (roadmap §37 item 4.4 "References endpoint"; §21:
+        `references` is its own endpoint group, explicitly SEPARATE from
+        `graph (callers/callees/impact)`). "References" answers "what
+        directly points at this symbol" -- DIRECT usages only, never a
+        transitive/depth-bucketed traversal (that concept is
+        `analyze_impact`'s, deliberately not reused here so the two
+        stay distinct, per this project's own repeated discipline
+        against conflating call graph / inheritance graph / impact
+        analysis).
+
+        Two direct-reference kinds, both single-hop:
+          - `callers`: symbols that directly call this one (`get_callers`
+            called with `max_depth=1` -- reuses that method's own
+            tested BFS/confidence/deterministic-ordering machinery
+            exactly as-is, just capped to one hop, not a new algorithm).
+          - `subclasses`: classes that directly list this symbol as one
+            of their `base_classes` (`get_direct_subclasses` -- reads
+            ONLY the inheritance-specific adjacency, never the calls-only
+            one, preserving Phase 4.1's separation invariant. This is
+            inheritance data's first real query surface -- extracted and
+            resolved since Phase 4.1, explicitly excluded from impact
+            analysis by Phase 4.2's Decision 1, and finally exposed
+            here).
+
+        Repository-scoped by the EXACT SAME `self.call_graphs.get(repo_id)`
+        pattern `analyze_impact`/`analyze_module_structure` already use.
+        Computed fresh from the current in-memory snapshot on every call
+        -- no persistence, no incremental machinery. A cold cache (never
+        indexed this process, or after a restart) degrades to empty
+        lists, never an error.
+        """
+        repo_call_graph = self.call_graphs.get(repo_id)
+        if repo_call_graph:
+            callers = repo_call_graph.get_callers(symbol_name, file_path, max_depth=1)
+            subclasses = repo_call_graph.get_direct_subclasses(symbol_name, file_path)
+        else:
+            callers, subclasses = [], []
+
+        return {
+            "symbol": symbol_name,
+            "callers": callers,
+            "subclasses": subclasses,
+        }

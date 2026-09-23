@@ -129,6 +129,13 @@ class CallGraphBuilder:
         self.inheritance_edges: list[CallGraphEdge] = []
         self.inheritance_adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
         self.reverse_inheritance_adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        # Phase 4.4 (roadmap §37 item 4.4 "References endpoint"): the
+        # inheritance-side counterpart to `edge_meta`, same (src_key,
+        # tgt_key) -> confidence lookup shape, built in the SAME loop
+        # that populates `inheritance_adjacency` -- CALLS ONLY structures
+        # above are never touched by this. Lets `get_direct_subclasses`
+        # attach confidence without a second traversal or a new index.
+        self.inheritance_edge_meta: dict[tuple[tuple[str, str], tuple[str, str]], Optional[str]] = {}
         self._build_graph()
 
     def _resolve_target(
@@ -255,6 +262,7 @@ class CallGraphBuilder:
                     tgt_key = (target_file or "", base_name)
                     self.inheritance_adjacency[src_key].add(tgt_key)
                     self.reverse_inheritance_adjacency[tgt_key].add(src_key)
+                    self.inheritance_edge_meta[(src_key, tgt_key)] = confidence
 
     def get_callees(self, symbol_name: str, file_path: str = "", max_depth: int = 3) -> list[dict]:
         """
@@ -397,4 +405,55 @@ class CallGraphBuilder:
         )
         for r in results:
             del r["_call_count"]
+        return results
+
+    def get_direct_subclasses(self, symbol_name: str, file_path: str = "") -> list[dict]:
+        """
+        Phase 4.4 (roadmap §37 item 4.4 "References endpoint"; §21's
+        `references` endpoint group, kept explicitly SEPARATE from
+        `graph (callers/callees/impact)`). "References" is a DIRECT,
+        single-hop lookup, not a transitive/bucketed traversal the way
+        impact analysis is (Phase 4.2's own explicit calls-only,
+        depth-bucketed design is a different concept, deliberately not
+        reused here) -- so this is a plain adjacency lookup, not a BFS.
+
+        Reads `self.reverse_inheritance_adjacency`/
+        `self.inheritance_edge_meta` exclusively -- NEVER the calls-only
+        `self.reverse_adjacency`, preserving Phase 4.1's separation
+        invariant. Returns every class that directly lists `symbol_name`
+        as one of its `base_classes`, each with its own resolution
+        `confidence` (the same high/low/unresolved vocabulary, no new
+        tier), deterministically ordered by `(confidence, file, symbol)`
+        -- no `call_count` tiebreaker, since every inheritance edge's
+        `call_count` is always `1` (not a real signal, see
+        `CallGraphEdge.relationship_type`'s own docstring).
+        """
+        file_path = file_path.replace("\\", "/")
+        candidate_keys: list[tuple[str, str]] = []
+
+        if file_path:
+            candidate_keys.append((file_path, symbol_name))
+            candidate_keys.append(("", symbol_name))
+        else:
+            candidate_keys = [
+                (f, s) for (f, s) in self.reverse_inheritance_adjacency if s == symbol_name
+            ]
+
+        if not candidate_keys:
+            candidate_keys.append(("", symbol_name))
+
+        seen: set[tuple[str, str]] = set()
+        results = []
+        for key in candidate_keys:
+            for sub_key in self.reverse_inheritance_adjacency.get(key, set()):
+                if sub_key in seen:
+                    continue
+                seen.add(sub_key)
+                src_file, src_sym = sub_key
+                confidence = self.inheritance_edge_meta.get((sub_key, key))
+                results.append({"symbol": src_sym, "file": src_file, "confidence": confidence})
+
+        results.sort(
+            key=lambda r: (self._CONFIDENCE_SORT_RANK.get(r["confidence"], 3), r["file"], r["symbol"])
+        )
         return results

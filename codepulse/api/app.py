@@ -483,6 +483,34 @@ def analyze_impact(
 
 
 # -------------------------------------------------------------
+# 6b. References (GET /v1/symbols/{id}/references)
+# -------------------------------------------------------------
+@app.get("/v1/symbols/{symbol_id}/references")
+def get_symbol_references(symbol_id: int, auth: AuthorizedKey = Depends(require_api_key)):
+    session = storage_manager.get_session()
+    try:
+        sym = session.query(SymbolModel).filter(SymbolModel.id == symbol_id).first()
+        if not sym:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        if not sym.file:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        auth.authorize_repository(sym.file.repo_id)
+
+        # Phase 4.4 (roadmap §37 item 4.4; §21's `references` endpoint
+        # group, kept explicitly SEPARATE from `graph (callers/callees/
+        # impact)`): thin adapter over the shared
+        # `IndexingEngine.analyze_references` intelligence-core method --
+        # same repository-isolation pattern as `analyze_impact` above
+        # (`sym.file.repo_id` resolved from the requested symbol's own
+        # file, never a client-suppliable parameter).
+        return indexing_engine.analyze_references(
+            sym.name, sym.file.path if sym.file else "", sym.file.repo_id
+        )
+    finally:
+        session.close()
+
+
+# -------------------------------------------------------------
 # 7. Autocomplete (GET /v1/autocomplete)
 # -------------------------------------------------------------
 @app.get("/v1/autocomplete")
