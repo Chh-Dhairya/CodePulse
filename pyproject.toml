@@ -53,6 +53,13 @@ dependencies = [
     # drop or change that transitive requirement.
     "networkx>=3.0,<4.0",
 
+    # MCP Server -- Phase 5.3 (roadmap §37 item 5.3; §13 MCP Strategy:
+    # "yes, expose an MCP server -- but strictly as an adapter").
+    # `codepulse/mcp_server.py` uses the official SDK's `FastMCP`
+    # server class; every tool it registers calls straight into
+    # `IndexingEngine`, no parallel implementation.
+    "mcp>=1.9.0,<2.0.0",
+
     # AI / Embeddings
     "sentence-transformers>=3.0.0,<3.1.0",
     "torch>=2.3.0,<2.4.0",
