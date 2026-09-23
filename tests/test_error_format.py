@@ -142,7 +142,11 @@ def test_409_conflict_uses_the_structured_envelope(client, isolated_app, tmp_pat
         session.close()
     create_job(isolated_app, repo_id)  # leaves an active ("queued") job
 
-    headers = make_api_key_headers(isolated_app)
+    # Phase 7.2 (RBAC): re-indexing an EXISTING repository now requires
+    # "indexer" role scoped to it -- granted explicitly here so this
+    # test continues to exercise the 409 conflict path itself, not the
+    # (unrelated) authorization gate.
+    headers = make_api_key_headers(isolated_app, repository_ids=[repo_id], role="indexer")
     response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     assert response.status_code == 409
     error = _assert_envelope_shape(response.json())

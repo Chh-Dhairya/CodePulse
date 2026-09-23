@@ -56,11 +56,11 @@ this milestone.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Header, HTTPException, status
 
-from codepulse.auth import verify_api_key
+from codepulse.auth import ROLE_RANK, verify_api_key
 from codepulse.storage.db import APIKeyRepositoryModel
 
 
@@ -75,10 +75,23 @@ class AuthorizedKey:
     at all. There is no sentinel meaning "all repositories": every
     repository-scoped endpoint must check membership in this set via
     `authorize_repository`/`authorize_search_scope`.
+
+    Phase 7.2 (roadmap §37 item 7.2): `repository_roles` maps each
+    granted `repository_id` to its own `role` (`"viewer"`/`"indexer"`/
+    `"admin"`) -- per §15's "enforced at the repository-permission
+    level, not globally," a single key can hold DIFFERENT roles for
+    different repositories. `authorize_role` is the role-aware
+    counterpart to `authorize_repository`; membership-only endpoints
+    keep using `authorize_repository`/`authorize_search_scope`
+    unchanged (every role implies at least "viewer," so a plain
+    membership check remains correct for read-only endpoints -- it is
+    not a security gap, just a coarser check than `authorize_role`
+    would make for those routes).
     """
 
     api_key_id: int
     repository_ids: frozenset[int]
+    repository_roles: dict[int, str] = field(default_factory=dict)
 
     def authorize_repository(self, repository_id: int) -> None:
         """Raises HTTP 403 unless this key is scoped to `repository_id`."""
@@ -86,6 +99,26 @@ class AuthorizedKey:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"API key is not scoped to repository {repository_id}",
+            )
+
+    def authorize_role(self, repository_id: int, required_role: str) -> None:
+        """
+        Raises HTTP 403 unless this key is scoped to `repository_id`
+        AND its role there is AT LEAST `required_role` (§15's ordering:
+        `viewer` < `indexer` < `admin`). Always checks membership first
+        (via `authorize_repository`, reused unmodified) so an
+        unauthorized-repository request gets the same 403 it always
+        has, before any role-specific detail is considered.
+        """
+        self.authorize_repository(repository_id)
+        held_role = self.repository_roles.get(repository_id)
+        if ROLE_RANK.get(held_role, -1) < ROLE_RANK[required_role]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"API key has role {held_role!r} for repository {repository_id}, "
+                    f"but {required_role!r} (or higher) is required for this operation."
+                ),
             )
 
     def authorize_search_scope(self, repository_id: int | None) -> None:
@@ -142,8 +175,8 @@ def require_api_key(
 
     session = app_module.storage_manager.get_session()
     try:
-        repo_ids = {
-            row.repo_id
+        grants = {
+            row.repo_id: row.role
             for row in session.query(APIKeyRepositoryModel)
             .filter(APIKeyRepositoryModel.api_key_id == api_key_id)
             .all()
@@ -151,4 +184,6 @@ def require_api_key(
     finally:
         session.close()
 
-    return AuthorizedKey(api_key_id=api_key_id, repository_ids=frozenset(repo_ids))
+    return AuthorizedKey(
+        api_key_id=api_key_id, repository_ids=frozenset(grants.keys()), repository_roles=grants
+    )

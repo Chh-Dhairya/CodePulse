@@ -82,11 +82,12 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes Phase 4.1's
-        # base_classes/relationship_type migration on top of the
+        # Verify revision recorded (head now includes Phase 7.2's
+        # api_key_repositories.role migration on top of Phase 4.1's
+        # base_classes/relationship_type migration and the
         # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "135a7b064ea7"
+        assert current_rev == "b9014c049e33"
 
         # Verify the isolation-fix column exists on call_edges
         call_edge_cols = {col["name"] for col in insp.get_columns("call_edges")}
@@ -242,10 +243,11 @@ def test_existing_database_stamping_scenario_2():
         stamp_database(db_url=db_url, revision="head")
 
         # Verify alembic_version is now recorded (head now includes Phase
-        # 4.1's base_classes/relationship_type migration on top of the
+        # 7.2's api_key_repositories.role migration on top of Phase
+        # 4.1's base_classes/relationship_type migration and the
         # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "135a7b064ea7"
+        assert current_rev == "b9014c049e33"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:

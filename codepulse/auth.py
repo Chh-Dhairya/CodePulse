@@ -16,8 +16,9 @@ docstring for the schema-level rationale):
 
 Deliberately NOT in scope for Phase 1.1 (do not infer these from later
 Phase 1 milestones): request-header parsing, HTTP 401/403 responses,
-FastAPI `Depends()` wiring, rate limiting, role-based permission checks
-(roadmap §15's viewer/indexer/admin roles are Phase 7 / B25 scope), a
+FastAPI `Depends()` wiring, rate limiting (roadmap §15's viewer/
+indexer/admin roles were Phase 7 / B25 scope -- `create_api_key` below
+now accepts a `role` per repository grant, see its own docstring), a
 mutating revoke() flow (only the `revoked_at` schema column exists),
 key expiry, audit logging.
 
@@ -39,6 +40,15 @@ from codepulse.storage.db import APIKeyModel, APIKeyRepositoryModel, RepositoryM
 API_KEY_PREFIX = "cpk_"
 _RAW_KEY_ENTROPY_BYTES = 32  # 256 bits, via secrets.token_urlsafe
 _KEY_PREFIX_DISPLAY_LENGTH = len(API_KEY_PREFIX) + 8  # e.g. "cpk_a1b2c3d4"
+
+# Phase 7.2 (roadmap §37 item 7.2; §15's literal minimal-viable model):
+# "roles `viewer` (search/read), `indexer` (viewer + trigger indexing),
+# `admin` (all + manage keys/repos)." Ordered ranking used by
+# `AuthorizedKey.authorize_role` (codepulse/api/security.py) --
+# defined here, once, so both modules share the exact same vocabulary
+# and ordering rather than each hardcoding its own copy.
+VALID_ROLES = ("viewer", "indexer", "admin")
+ROLE_RANK = {role: rank for rank, role in enumerate(VALID_ROLES)}
 
 
 @dataclass(frozen=True)
@@ -83,6 +93,7 @@ def create_api_key(
     storage: StorageManager,
     name: str,
     repository_ids: list[int] | None = None,
+    role: str = "viewer",
 ) -> CreatedAPIKey:
     """
     Creates a new API key: generates a random raw key, persists only its
@@ -92,7 +103,23 @@ def create_api_key(
     `repository_ids`, if given, must all reference existing repositories
     -- this is validated (raising ValueError otherwise) so a key can never
     silently claim to be scoped to a repository that doesn't exist.
+
+    Phase 7.2 (roadmap §37 item 7.2): `role` is applied uniformly to
+    every one of `repository_ids`' grant rows created in this one call
+    (a caller wanting DIFFERENT roles per repository calls this more
+    than once -- §15's "enforced at the repository-permission level,
+    not globally" means role lives on the grant row, it does not mean
+    one call must support a mixed batch; no roadmap text asks for
+    that). Must be one of `VALID_ROLES` (`ValueError` otherwise).
+    Defaults to `"viewer"` -- the SAFE, least-privilege choice for
+    every NEWLY created grant, deliberately different from
+    `APIKeyRepositoryModel.role`'s own schema-level default (`"admin"`,
+    which exists only to honestly backfill grants that predate this
+    role concept -- see that column's own docstring).
     """
+    if role not in VALID_ROLES:
+        raise ValueError(f"Invalid role {role!r}; must be one of {VALID_ROLES}")
+
     session = storage.get_session()
     try:
         if repository_ids:
@@ -121,7 +148,7 @@ def create_api_key(
         session.flush()  # assign api_key.id
 
         for repo_id in repository_ids or []:
-            session.add(APIKeyRepositoryModel(api_key_id=api_key.id, repo_id=repo_id))
+            session.add(APIKeyRepositoryModel(api_key_id=api_key.id, repo_id=repo_id, role=role))
 
         session.commit()
 

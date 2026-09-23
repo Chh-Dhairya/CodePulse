@@ -224,6 +224,25 @@ def index_repository(
     except IngestionSafetyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Phase 7.2 (roadmap §37 item 7.2; §15: "indexer (viewer + trigger
+    # indexing)"): if `req.url` already names a KNOWN repository, this
+    # call is a RE-index of something a key may already be scoped to at
+    # only "viewer" -- require at least "indexer" role for that
+    # specific repository. A genuinely NEW repository has no existing
+    # grant for anyone to check against, so it remains open to any
+    # authenticated key, exactly matching this endpoint's own
+    # pre-existing, still-accurate rationale a few lines below (Phase
+    # 1.2: no repository scope exists yet to check a not-yet-indexed
+    # path against).
+    _session = storage_manager.get_session()
+    try:
+        _existing_repo = _session.query(RepositoryModel).filter(RepositoryModel.url == req.url).first()
+        _existing_repo_id = _existing_repo.id if _existing_repo else None
+    finally:
+        _session.close()
+    if _existing_repo_id is not None:
+        auth.authorize_role(_existing_repo_id, "indexer")
+
     repo_name = os.path.basename(req.url)
     # Phase 1.3: resolve (or create) the real repository id up front, via
     # the exact same natural-key resolution IndexingEngine.index_directory

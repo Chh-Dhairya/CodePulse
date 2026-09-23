@@ -232,8 +232,11 @@ class APIKeyModel(Base):
     hashing, and a creation (+ verification-primitive) flow. Enforcing
     this at the API boundary (a FastAPI dependency required on every
     route) is Phase 1.2, deliberately not implemented here. Role-based
-    permissions (viewer/indexer/admin, roadmap §15) are Phase 7 (B25)
-    scope and are not modeled yet -- no `role` column exists on this table.
+    permissions (viewer/indexer/admin, roadmap §15) were Phase 7 (B25)
+    scope -- see `APIKeyRepositoryModel.role`'s own docstring; the role
+    lives on the per-repository grant row, not here on `APIKeyModel`
+    itself, per §15's own "enforced at the repository-permission level,
+    not globally."
     """
     __tablename__ = "api_keys"
     __table_args__ = (
@@ -273,6 +276,27 @@ class APIKeyRepositoryModel(Base):
     (api_key, repository) pair a key is permitted to access. This table
     only records the grant -- Phase 1.1 does not read or enforce it
     anywhere; that's Phase 1.2's central authorization dependency.
+
+    Phase 7.2 (roadmap §37 item 7.2 "RBAC roles + repo permission
+    model"; §15's own literal minimal-viable model: *"roles `viewer`
+    (search/read), `indexer` (viewer + trigger indexing), `admin` (all +
+    manage keys/repos). Enforced at the repository-permission level, not
+    globally."*): `role` lives HERE, on the per-(key, repository) grant
+    row, not on `APIKeyModel` itself -- exactly matching "not globally."
+    A single key can legitimately be `viewer` on one repository and
+    `admin` on another.
+
+    `NOT NULL DEFAULT 'admin'`: every grant created before this
+    milestone had, in practice, UNRESTRICTED access to every endpoint
+    that checked repository membership alone (no role concept existed
+    to restrict it) -- backfilling to `'admin'` reflects each existing
+    grant's actual historical capability honestly, not a guess (unlike
+    an ambiguous backfill elsewhere in this project's history, this one
+    has a single, unambiguous correct answer). `codepulse.auth.
+    create_api_key`'s own default for NEWLY created grants going
+    forward is intentionally the safer `'viewer'` (least privilege),
+    matching this table's forward-looking correctness rather than its
+    backfilled historical value.
     """
     __tablename__ = "api_key_repositories"
     __table_args__ = (
@@ -282,6 +306,7 @@ class APIKeyRepositoryModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     api_key_id = Column(Integer, ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False)
     repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(20), nullable=False, default="admin", server_default="admin")
 
     api_key = relationship("APIKeyModel", back_populates="repositories")
 

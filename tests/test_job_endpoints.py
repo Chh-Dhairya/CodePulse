@@ -154,21 +154,47 @@ def test_index_repository_rejects_a_second_request_while_a_job_is_active(client,
 
     create_job(isolated_app, repo_id)  # leaves it in "queued" -- still active
 
-    headers = make_api_key_headers(isolated_app)
+    # Phase 7.2 (RBAC): re-indexing a repository that ALREADY EXISTS now
+    # requires at least "indexer" role scoped to it (§15) -- this test
+    # is about the active-job conflict check specifically, so the key
+    # is explicitly granted that role for the repo it's testing against
+    # (a real operator's key would already be scoped this way before
+    # attempting to re-index anything), not left unscoped as it was
+    # before RBAC existed.
+    headers = make_api_key_headers(isolated_app, repository_ids=[repo_id], role="indexer")
     response = client.post("/v1/repositories/index", json={"url": url}, headers=headers)
     assert response.status_code == 409
 
 
 def test_index_repository_succeeds_again_once_the_prior_job_is_terminal(client, isolated_app, tmp_path):
     repo_dir = _make_repo_dir(tmp_path, "repo1")
-    headers = make_api_key_headers(isolated_app)
+    url = str(repo_dir)
 
-    first = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
+    # Phase 7.2 (RBAC): the FIRST call below creates a genuinely NEW
+    # repository (open to any authenticated key, unchanged) -- but the
+    # SECOND call re-indexes that now-EXISTING repository, which
+    # requires "indexer" role. Pre-creating the repository row and
+    # granting the key that role up front keeps this test's own focus
+    # (the job-terminal-state logic) unaffected by RBAC, matching a
+    # real operator's actual key-provisioning order (scoped BEFORE
+    # indexing, not granted implicitly by having created it).
+    session = isolated_app.get_session()
+    try:
+        repo = RepositoryModel(name="repo1", url=url)
+        session.add(repo)
+        session.commit()
+        repo_id = repo.id
+    finally:
+        session.close()
+
+    headers = make_api_key_headers(isolated_app, repository_ids=[repo_id], role="indexer")
+
+    first = client.post("/v1/repositories/index", json={"url": url}, headers=headers)
     assert first.status_code == 202
     # TestClient's synchronous BackgroundTasks execution means the first
     # job has already reached a terminal state (succeeded/failed) by now.
 
-    second = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
+    second = client.post("/v1/repositories/index", json={"url": url}, headers=headers)
     assert second.status_code == 202
     assert second.json()["job_id"] != first.json()["job_id"]
 

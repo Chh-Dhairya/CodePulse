@@ -63,8 +63,22 @@ def isolated_app(tmp_path, monkeypatch):
 
 
 def make_api_key_headers(
-    storage: StorageManager, *, repository_ids: list[int] | None = None, name: str = "test-key"
+    storage: StorageManager, *, repository_ids: list[int] | None = None, name: str = "test-key",
+    role: str = "admin",
 ) -> dict[str, str]:
-    """Creates a real API key against `storage` and returns it as request headers."""
-    created = create_api_key(storage, name=name, repository_ids=repository_ids)
+    """
+    Creates a real API key against `storage` and returns it as request
+    headers.
+
+    `role="admin"` by default -- Phase 7.2 (roadmap §37 item 7.2) added
+    role-based grants with a SAFER `"viewer"` default on
+    `codepulse.auth.create_api_key` itself, but every test written
+    before Phase 7.2 (and most written since, since role-boundary
+    testing is not most tests' actual concern) implicitly assumes the
+    unrestricted, pre-RBAC behavior every key had before this milestone
+    -- `role="admin"` here preserves that for the whole existing test
+    suite. Tests that specifically exercise role boundaries pass
+    `role="viewer"`/`role="indexer"` explicitly.
+    """
+    created = create_api_key(storage, name=name, repository_ids=repository_ids, role=role)
     return {"X-API-Key": created.raw_key}
