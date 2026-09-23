@@ -132,12 +132,14 @@ def install_error_handlers(app: FastAPI) -> None:
         retry_after = exc.headers.get("Retry-After") if exc.headers else None
         if retry_after is not None:
             details["retry_after_seconds"] = int(retry_after)
+        _record_api_error(request, exc.status_code)
         return error_json_response(exc.status_code, str(exc.detail), details, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
+        _record_api_error(request, HTTPStatus.UNPROCESSABLE_ENTITY)
         return error_json_response(
             HTTPStatus.UNPROCESSABLE_ENTITY,
             "Request validation failed",
@@ -147,4 +149,11 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled exception in request %s %s", request.method, request.url.path)
+        _record_api_error(request, HTTPStatus.INTERNAL_SERVER_ERROR)
         return error_json_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Internal server error")
+
+
+def _record_api_error(request: Request, status_code: int) -> None:
+    """Phase 7.4 (roadmap §37 item 7.4; §18: "api_errors_total{endpoint,status_code}") -- one call site, reused by every handler above and the rate-limit middleware (codepulse/api/app.py)."""
+    from codepulse.observability import api_errors_total
+    api_errors_total.labels(endpoint=request.url.path, status_code=str(int(status_code))).inc()

@@ -138,6 +138,11 @@ def mark_running(storage: StorageManager, job_id: int) -> None:
             session.commit()
     finally:
         session.close()
+    # Phase 7.4 (roadmap §37 item 7.4; §18: "indexing_jobs_total{status}"):
+    # real state-transition counter, incremented at the exact moment
+    # this transition actually happens -- not a synthetic/estimated value.
+    from codepulse.observability import indexing_jobs_total
+    indexing_jobs_total.labels(status="running").inc()
 
 
 def mark_succeeded(storage: StorageManager, job_id: int, result: dict[str, Any]) -> None:
@@ -157,6 +162,8 @@ def mark_succeeded(storage: StorageManager, job_id: int, result: dict[str, Any])
             session.commit()
     finally:
         session.close()
+    from codepulse.observability import indexing_jobs_total
+    indexing_jobs_total.labels(status="succeeded").inc()
 
 
 def mark_failed(storage: StorageManager, job_id: int, error: str) -> None:
@@ -171,6 +178,8 @@ def mark_failed(storage: StorageManager, job_id: int, error: str) -> None:
             session.commit()
     finally:
         session.close()
+    from codepulse.observability import indexing_jobs_total
+    indexing_jobs_total.labels(status="failed").inc()
 
 
 def get_job(storage: StorageManager, job_id: int) -> JobInfo | None:

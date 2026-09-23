@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, BackgroundTasks, Req
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from codepulse.api.errors import error_json_response, install_error_handlers
+from codepulse.api.errors import _record_api_error, error_json_response, install_error_handlers
 from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
@@ -76,6 +76,7 @@ async def _rate_limit_middleware(request: Request, call_next):
         # middleware can't just `raise HTTPException(...)` and rely on
         # those handlers to catch it.
         retry_after_seconds = math.ceil(retry_after)
+        _record_api_error(request, 429)
         return error_json_response(
             429,
             "Rate limit exceeded. Try again later.",
@@ -96,6 +97,78 @@ app.add_middleware(
 # Global in-memory engine and storage instances
 storage_manager = StorageManager()
 indexing_engine = IndexingEngine(storage=storage_manager)
+
+
+# -------------------------------------------------------------
+# 0. Health + Metrics (roadmap §37 item 7.4; §18 Observability
+# Architecture; §21: "Every endpoint requires an API key (§15) except
+# `/health/*`" -- these three, plus /metrics for the same reason
+# real Prometheus scraping is never per-repository-scoped, carry NO
+# `Depends(require_api_key)`.
+# -------------------------------------------------------------
+@app.get("/health/live")
+def health_live():
+    """Process is up. No dependency checks -- a failure here means the process itself is unresponsive, not that some downstream is degraded."""
+    return {"status": "live"}
+
+
+@app.get("/health/ready")
+def health_ready():
+    """DB reachable, embedding model loaded, index storage writable -- §18's own exact three checks. A "ready" failure should stop new traffic/jobs, not restart the process, which is why this is a separate endpoint from /health/live."""
+    from sqlalchemy import text as _text
+
+    checks: dict[str, bool] = {}
+
+    try:
+        session = storage_manager.get_session()
+        try:
+            session.execute(_text("SELECT 1"))
+        finally:
+            session.close()
+        checks["database_reachable"] = True
+    except Exception:
+        checks["database_reachable"] = False
+
+    checks["embedding_model_loaded"] = indexing_engine.embedder is not None and getattr(
+        indexing_engine.embedder, "_model", None
+    ) is not None
+
+    try:
+        db_dir = os.path.dirname(os.path.abspath(storage_manager.db_url.replace("sqlite:///", ""))) or "."
+        checks["index_storage_writable"] = os.access(db_dir, os.W_OK)
+    except Exception:
+        checks["index_storage_writable"] = False
+
+    ready = all(checks.values())
+    status_code = 200 if ready else 503
+    from fastapi.responses import JSONResponse as _JSONResponse
+    return _JSONResponse(status_code=status_code, content={"status": "ready" if ready else "not_ready", "checks": checks})
+
+
+@app.get("/metrics")
+def metrics():
+    """Real, current Prometheus exposition-format metrics -- §18's own named counters/histograms/gauge, generated fresh on every scrape."""
+    from fastapi.responses import Response as _Response
+    from codepulse.observability import job_queue_depth, render_metrics
+    from codepulse.storage.db import IndexJobModel
+
+    # Refresh the gauge (a point-in-time CURRENT value, not a running
+    # total) right before serializing, from a real query -- never a
+    # cached/stale count.
+    try:
+        session = storage_manager.get_session()
+        try:
+            depth = session.query(IndexJobModel).filter(
+                IndexJobModel.status.in_(["queued", "running"])
+            ).count()
+        finally:
+            session.close()
+        job_queue_depth.set(depth)
+    except Exception:
+        pass
+
+    body, content_type = render_metrics()
+    return _Response(content=body, media_type=content_type)
 
 # Request / Response Schemas
 class SearchRequest(BaseModel):
@@ -165,7 +238,16 @@ def search(req: SearchRequest, auth: AuthorizedKey = Depends(require_api_key)):
         search_type=req.search_type,
         repository_id=req.repository_id,
     )
-    exec_time_ms = int((time.time() - t0) * 1000)
+    elapsed = time.time() - t0
+    exec_time_ms = int(elapsed * 1000)
+
+    # Phase 7.4 (roadmap §37 item 7.4; §18: "search_requests_total
+    # {search_type}", "search_latency_seconds", "search_zero_result_total").
+    from codepulse.observability import search_latency_seconds, search_requests_total, search_zero_result_total
+    search_requests_total.labels(search_type=req.search_type).inc()
+    search_latency_seconds.observe(elapsed)
+    if not results:
+        search_zero_result_total.inc()
 
     return {
         "results": [r.to_dict() for r in results],
@@ -281,12 +363,19 @@ def index_repository(
         # orchestration lives entirely here, at the API boundary (see
         # codepulse/jobs.py's module docstring).
         mark_running(storage_manager, job.id)
+        # Phase 7.4 (roadmap §37 item 7.4; §18: "indexing_duration_seconds",
+        # "files_indexed_total", "symbols_indexed_total").
+        from codepulse.observability import files_indexed_total, indexing_duration_seconds, symbols_indexed_total
+        _t0 = time.time()
         try:
             result = indexing_engine.index_directory(
                 repo_path=resolved_path,
                 repo_name=repo_name,
                 repo_url=req.url,
             )
+            indexing_duration_seconds.observe(time.time() - _t0)
+            files_indexed_total.inc(result.get("total_files", 0))
+            symbols_indexed_total.inc(result.get("total_symbols", 0))
             mark_succeeded(storage_manager, job.id, result)
         except Exception as e:
             # Phase 1.5: this also catches IngestionSafetyError raised

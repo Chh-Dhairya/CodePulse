@@ -78,21 +78,24 @@ class CodeEmbedder:
 
         model = self._get_model()
 
-        try:
-            embeddings = model.encode(
-                text_list,
-                batch_size=batch_size,
-                show_progress_bar=False,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-            )
-        except EmbeddingUnavailableError:
-            raise
-        except Exception as e:
-            logger.error("Embedding model '%s' failed to encode input: %s", self.model_name, e)
-            raise EmbeddingUnavailableError(
-                f"Embedding model '{self.model_name}' failed to encode input: {e}"
-            ) from e
+        # Phase 7.4 (roadmap §37 item 7.4; §18: "embedding_duration_seconds").
+        from codepulse.observability import embedding_duration_seconds
+        with embedding_duration_seconds.time():
+            try:
+                embeddings = model.encode(
+                    text_list,
+                    batch_size=batch_size,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
+            except EmbeddingUnavailableError:
+                raise
+            except Exception as e:
+                logger.error("Embedding model '%s' failed to encode input: %s", self.model_name, e)
+                raise EmbeddingUnavailableError(
+                    f"Embedding model '{self.model_name}' failed to encode input: {e}"
+                ) from e
 
         return embeddings[0] if is_single else embeddings
 
