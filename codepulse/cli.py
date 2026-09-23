@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -12,10 +13,13 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.tree import Tree
 
+from sqlalchemy import text
+
 from codepulse.embeddings.embedder import CodeEmbedder
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
+from codepulse.storage.db import StorageManager
 
 if sys.platform == "win32":
     try:
@@ -139,7 +143,7 @@ def cmd_index_and_search(args: argparse.Namespace) -> None:
 
     # If a query is provided directly
     if args.query:
-        _perform_search(engine, args.query, args.type, args.limit)
+        _perform_search(engine, args.query, args.type, args.limit, json_output=getattr(args, "json", False))
     else:
         # Interactive REPL mode
         console.print("[bold yellow]Interactive Search Mode. Type 'exit' to quit.[/bold yellow]\n")
@@ -156,10 +160,14 @@ def cmd_index_and_search(args: argparse.Namespace) -> None:
                 break
 
 
-def _perform_search(engine: IndexingEngine, query: str, search_type: str, limit: int) -> None:
+def _perform_search(engine: IndexingEngine, query: str, search_type: str, limit: int, json_output: bool = False) -> None:
     t0 = time.time()
     results = engine.search(query, limit=limit, search_type=search_type)
     search_ms = (time.time() - t0) * 1000
+
+    if json_output:
+        print(json.dumps({"query": query, "search_type": search_type, "results": [r.to_dict() for r in results]}, indent=2, default=str))
+        return
 
     if not results:
         console.print(f"[yellow]No matching code symbols found for '{query}'[/yellow]\n")
@@ -200,10 +208,11 @@ def cmd_impact(args: argparse.Namespace) -> None:
     result = engine.index_directory(path)
 
     if not engine.call_graph:
-        console.print("[red]Call graph not available.[/red]")
+        if getattr(args, "json", False):
+            print(json.dumps({"error": "call_graph_not_available", "message": "Call graph not available."}))
+        else:
+            console.print("[red]Call graph not available.[/red]")
         return
-
-    console.print(Panel(f"[bold magenta]Impact Analysis for symbol:[/bold magenta] [bold green]{symbol_name}[/bold green]"))
 
     # Phase 4.2 (roadmap §37 item 4.2): redirected to the shared
     # `IndexingEngine.analyze_impact` intelligence-core method instead of
@@ -215,6 +224,11 @@ def cmd_impact(args: argparse.Namespace) -> None:
     # (this Rich `Tree`) is unchanged.
     repository_id = result["repository_id"]
     impact = engine.analyze_impact(symbol_name, "", repository_id, max_depth=args.depth)
+    if getattr(args, "json", False):
+        print(json.dumps(impact, indent=2, default=str))
+        return
+
+    console.print(Panel(f"[bold magenta]Impact Analysis for symbol:[/bold magenta] [bold green]{symbol_name}[/bold green]"))
     callers = impact["call_chain"]
     callees = impact["dependencies"]
 
@@ -231,6 +245,330 @@ def cmd_impact(args: argparse.Namespace) -> None:
 
     console.print(tree)
     console.print()
+
+
+# --- Phase 6.1 (roadmap §37 item 6.1 "Full CLI command set"; §22 CLI
+# Strategy; §45 backlog B21: "All §22 commands implemented with --json
+# output"). Every command below follows the exact same established
+# pattern `search`/`impact` already use: construct a fresh
+# `IndexingEngine`, call `index_directory(path)` (cheap and idempotent
+# for an already-indexed, unchanged repository, per Phase 3's own
+# incremental-indexing machinery -- not a new "persistent session"
+# mechanism), then delegate to the SAME shared `IndexingEngine.analyze_*`
+# methods the REST/MCP adapters already call. No business logic is
+# reimplemented here. --------------------------------------------------
+
+def _print_json(data) -> None:
+    print(json.dumps(data, indent=2, default=str))
+
+
+def cmd_init(args: argparse.Namespace) -> None:
+    """Creates a starter codepulse.toml in the target directory -- no infra required (§25 Local Deployment Strategy)."""
+    target_dir = args.path
+    os.makedirs(target_dir, exist_ok=True)
+    config_path = os.path.join(target_dir, "codepulse.toml")
+    if os.path.exists(config_path) and not args.force:
+        console.print(f"[yellow]{config_path} already exists -- use --force to overwrite.[/yellow]")
+        return
+
+    from codepulse.config import CodePulseConfig
+    defaults = CodePulseConfig()
+    with open(config_path, "w", encoding="utf-8") as f:
+        f.write(
+            "# CodePulse local configuration -- see CodePulse_Strategy_and_Roadmap.md §25.\n"
+            "# Precedence: CLI flags > CODEPULSE_* env vars > this file > built-in defaults.\n\n"
+            f'db_url = "{defaults.db_url}"\n'
+            f'embedding_model = "{defaults.embedding_model}"\n'
+        )
+    console.print(f"[bold green]✓[/bold green] Created {config_path}")
+
+
+def cmd_index(args: argparse.Namespace) -> None:
+    """Full index of a repository (standalone -- `search` already indexes as a side effect; this command exists for a plain `codepulse index <path>` workflow with no query)."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    if args.json:
+        _print_json(result)
+        return
+    console.print(
+        Panel(
+            f"[bold green]✓ Indexed[/bold green] {args.path}\n"
+            f"Repository id: [bold]{result['repository_id']}[/bold] | "
+            f"Files: [bold]{result.get('total_files', 0)}[/bold] | "
+            f"Incremental: [bold]{result.get('incremental', False)}[/bold]",
+            title="📊 Index Result",
+            border_style="green",
+        )
+    )
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    """Incremental (git-diff based when available) re-index -- a thin, clearer-intent alias over the same index_directory() call, which already detects and prefers an incremental run automatically (Phase 3.1)."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    if args.json:
+        _print_json(result)
+        return
+    kind = "incremental" if result.get("incremental") else "full"
+    console.print(f"[bold green]✓[/bold green] Update complete ({kind}) -- {result.get('total_files', 0)} file(s) processed.")
+
+
+def _resolve_symbol(engine: IndexingEngine, repo_id: int, name: str):
+    """Looks up a symbol by (repo_id, name) -- a repo can have more than
+    one symbol sharing a name (overloads, methods on different
+    classes), so this returns the full match list, never silently
+    picking one."""
+    from codepulse.storage.db import FileModel, SymbolModel
+
+    session = engine.storage.get_session()
+    try:
+        matches = (
+            session.query(SymbolModel)
+            .join(FileModel)
+            .filter(FileModel.repo_id == repo_id, SymbolModel.name == name)
+            .all()
+        )
+        return [
+            {
+                "id": s.id, "name": s.name, "type": s.type, "file_path": s.file.path,
+                "signature": s.signature, "docstring": s.docstring, "body": s.body,
+                "line_start": s.start_line, "line_end": s.end_line,
+            }
+            for s in matches
+        ]
+    finally:
+        session.close()
+
+
+def cmd_symbol(args: argparse.Namespace) -> None:
+    """Looks up and displays one symbol's definition."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    matches = _resolve_symbol(engine, result["repository_id"], args.symbol)
+
+    if not matches:
+        if args.json:
+            _print_json({"error": "symbol_not_found", "message": f"No symbol named {args.symbol!r}."})
+        else:
+            console.print(f"[red]No symbol named '{args.symbol}' found.[/red]")
+        return
+
+    if args.json:
+        _print_json({"matches": matches})
+        return
+
+    for m in matches:
+        console.print(
+            Panel(
+                f"[bold cyan]{m['signature']}[/bold cyan]\n\n"
+                f"{m['docstring'] or '[dim](no docstring)[/dim]'}\n\n"
+                f"[dim]{m['file_path']}:{m['line_start']}-{m['line_end']}[/dim]",
+                title=f"[{m['type']}] {m['name']}",
+                border_style="cyan",
+            )
+        )
+
+
+def cmd_refs(args: argparse.Namespace) -> None:
+    """Direct references (callers + direct subclasses) -- Phase 4.4's IndexingEngine.analyze_references, reused unmodified."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    refs = engine.analyze_references(args.symbol, "", result["repository_id"])
+    if args.json:
+        _print_json(refs)
+        return
+
+    tree = Tree(f"[bold yellow]References: {args.symbol}[/bold yellow]")
+    callers_branch = tree.add(f"[bold cyan]Direct callers ({len(refs['callers'])})[/bold cyan]")
+    for c in refs["callers"]:
+        callers_branch.add(f"{c['symbol']} ({c['file']}) [dim]confidence={c.get('confidence')}[/dim]")
+    sub_branch = tree.add(f"[bold magenta]Direct subclasses ({len(refs['subclasses'])})[/bold magenta]")
+    for s in refs["subclasses"]:
+        sub_branch.add(f"{s['symbol']} ({s['file']}) [dim]confidence={s.get('confidence')}[/dim]")
+    console.print(tree)
+
+
+def cmd_callers(args: argparse.Namespace) -> None:
+    """Callers of a symbol, direct + transitive (a projection of IndexingEngine.analyze_impact)."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    impact = engine.analyze_impact(args.symbol, "", result["repository_id"], max_depth=args.depth)
+    if args.json:
+        _print_json({"symbol": args.symbol, "callers": impact["call_chain"]})
+        return
+    tree = Tree(f"[bold red]▲ Callers of {args.symbol} ({len(impact['call_chain'])} found)[/bold red]")
+    for c in impact["call_chain"]:
+        tree.add(f"{c['symbol']} ({c['file']}) [dim]depth={c['depth']} confidence={c.get('confidence')}[/dim]")
+    console.print(tree)
+
+
+def cmd_callees(args: argparse.Namespace) -> None:
+    """Symbols called BY a symbol, direct + transitive (a projection of IndexingEngine.analyze_impact)."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    impact = engine.analyze_impact(args.symbol, "", result["repository_id"], max_depth=args.depth)
+    if args.json:
+        _print_json({"symbol": args.symbol, "callees": impact["dependencies"]})
+        return
+    tree = Tree(f"[bold blue]▼ Callees of {args.symbol} ({len(impact['dependencies'])} found)[/bold blue]")
+    for c in impact["dependencies"]:
+        tree.add(f"{c['symbol']} ({c['file']}) [dim]depth={c['depth']} confidence={c.get('confidence')}[/dim]")
+    console.print(tree)
+
+
+def cmd_similar(args: argparse.Namespace) -> None:
+    """Semantically similar symbols (IndexingEngine.find_similar_symbols, Phase 5.1)."""
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    matches = _resolve_symbol(engine, result["repository_id"], args.symbol)
+    if not matches:
+        if args.json:
+            _print_json({"error": "symbol_not_found", "message": f"No symbol named {args.symbol!r}."})
+        else:
+            console.print(f"[red]No symbol named '{args.symbol}' found.[/red]")
+        return
+
+    m = matches[0]
+    query_text = f"{m['signature']}\n{m['docstring'] or ''}\n{m['body'][:500]}"
+    similar = engine.find_similar_symbols(
+        query_text, m["name"], result["repository_id"], threshold=args.threshold, limit=args.limit
+    )
+    if args.json:
+        _print_json({"query_symbol": {"id": m["id"], "name": m["name"]}, "similar": similar})
+        return
+
+    table = Table(title=f"Symbols similar to {args.symbol}", border_style="cyan")
+    table.add_column("Symbol", style="bold green")
+    table.add_column("File", style="yellow")
+    table.add_column("Relevance", style="cyan")
+    for s in similar:
+        table.add_row(s["symbol_name"], s["file_path"], f"{s['relevance_score']:.2f}")
+    console.print(table)
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    """Index freshness -- last snapshot commit/time, file/symbol counts. Honest, not fabricated: no job history is reported (local CLI indexing runs synchronously and never creates IndexJob rows -- those are REST's async ingestion flow, Phase 1.3)."""
+    from codepulse.storage.db import RepositoryModel, RepositorySnapshotModel
+
+    engine = IndexingEngine()
+    session = engine.storage.get_session()
+    try:
+        repo_url = os.path.abspath(args.path)
+        repo = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+        if not repo:
+            payload = {"indexed": False, "path": repo_url}
+            if args.json:
+                _print_json(payload)
+            else:
+                console.print(f"[yellow]{repo_url} has not been indexed yet -- run `codepulse index {args.path}`.[/yellow]")
+            return
+
+        snapshot = (
+            session.query(RepositorySnapshotModel)
+            .filter(RepositorySnapshotModel.repo_id == repo.id)
+            .order_by(RepositorySnapshotModel.id.desc())
+            .first()
+        )
+        payload = {
+            "indexed": True,
+            "repository_id": repo.id,
+            "path": repo_url,
+            "file_count": repo.file_count,
+            "symbol_count": repo.symbol_count,
+            "last_snapshot_commit": snapshot.commit_sha if snapshot else None,
+            "last_indexed_at": snapshot.indexed_at if snapshot else None,
+        }
+    finally:
+        session.close()
+
+    if args.json:
+        _print_json(payload)
+        return
+    console.print(
+        Panel(
+            f"Repository id: [bold]{payload['repository_id']}[/bold]\n"
+            f"Files: [bold]{payload['file_count']}[/bold] | Symbols: [bold]{payload['symbol_count']}[/bold]\n"
+            f"Last snapshot commit: [bold]{payload['last_snapshot_commit'] or '(none / non-git)'}[/bold]\n"
+            f"Last indexed at: [bold]{payload['last_indexed_at']}[/bold]",
+            title=f"📈 Status: {args.path}",
+            border_style="cyan",
+        )
+    )
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    """Environment/config diagnostics -- embedding model loads? DB reachable? ignore rules active?"""
+    from codepulse.config import get_settings
+    from codepulse.indexer.ignore import RepositoryIgnoreRules
+
+    settings = get_settings()
+    checks: list[dict] = []
+
+    checks.append({"check": "config", "ok": True, "detail": f"db_url={settings.db_url}, embedding_model={settings.embedding_model}"})
+
+    try:
+        storage = StorageManager(db_url=settings.db_url)
+        session = storage.get_session()
+        session.execute(text("SELECT 1"))
+        session.close()
+        checks.append({"check": "database_reachable", "ok": True, "detail": settings.db_url})
+    except Exception as e:
+        checks.append({"check": "database_reachable", "ok": False, "detail": str(e)})
+
+    try:
+        embedder = CodeEmbedder()
+        _ = embedder.encode("def f(): pass")
+        checks.append({"check": "embedding_model_loads", "ok": True, "detail": settings.embedding_model})
+    except Exception as e:
+        checks.append({"check": "embedding_model_loads", "ok": False, "detail": str(e)})
+
+    target = args.path or "."
+    try:
+        rules = RepositoryIgnoreRules(target)
+        checks.append({"check": "ignore_rules_active", "ok": True, "detail": f"{target}"})
+    except Exception as e:
+        checks.append({"check": "ignore_rules_active", "ok": False, "detail": str(e)})
+
+    if args.json:
+        _print_json({"checks": checks})
+        return
+
+    table = Table(title="🩺 CodePulse Doctor", border_style="green")
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Detail", style="dim")
+    for c in checks:
+        status = "[bold green]OK[/bold green]" if c["ok"] else "[bold red]FAIL[/bold red]"
+        table.add_row(c["check"], status, c["detail"])
+    console.print(table)
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    """Starts the local REST API (default), or the MCP server over stdio with --mcp (§22: "start local API/MCP server")."""
+    if args.mcp:
+        if not args.api_key:
+            console.print("[bold red]Error:[/bold red] --api-key is required for --mcp (MCP connections are scoped to repositories at connection-setup time, §13).")
+            sys.exit(1)
+        import asyncio
+        from codepulse.config import get_settings
+        from codepulse.embeddings.embedder import CodeEmbedder as _Embedder
+        from codepulse.mcp_server import MCPAuthenticationError, build_mcp_server
+
+        settings = get_settings()
+        storage = StorageManager(db_url=settings.db_url)
+        engine = IndexingEngine(storage=storage, embedder=_Embedder())
+        try:
+            mcp = build_mcp_server(storage, engine, args.api_key)
+        except MCPAuthenticationError as e:
+            console.print(f"[bold red]Error:[/bold red] {e}")
+            sys.exit(1)
+        console.print("[bold green]✓[/bold green] MCP server starting (stdio transport)...")
+        asyncio.run(mcp.run_stdio_async())
+        return
+
+    import uvicorn
+    console.print(f"[bold green]✓[/bold green] Starting CodePulse API on http://{args.host}:{args.port}")
+    uvicorn.run("codepulse.api.app:app", host=args.host, port=args.port)
 
 
 def main() -> None:
@@ -254,12 +592,80 @@ def main() -> None:
     search_p.add_argument("--query", "-q", help="Search query (natural language or code identifier)", default=None)
     search_p.add_argument("--type", "-t", choices=["hybrid", "keyword", "semantic"], default="hybrid")
     search_p.add_argument("--limit", "-l", type=int, default=10)
+    search_p.add_argument("--json", action="store_true", help="Emit raw JSON instead of a formatted table (requires --query)")
 
     # 3. Impact analysis command
     impact_p = subparsers.add_parser("impact", help="Analyze call graph impact and blast radius")
     impact_p.add_argument("path", help="Repository path")
     impact_p.add_argument("symbol", help="Symbol name to analyze")
     impact_p.add_argument("--depth", "-d", type=int, default=3)
+    impact_p.add_argument("--json", action="store_true", help="Emit raw JSON instead of a formatted tree")
+
+    # 4. init
+    init_p = subparsers.add_parser("init", help="Create a local codepulse.toml config -- no infra required")
+    init_p.add_argument("path", nargs="?", default=".", help="Directory to create codepulse.toml in (default: cwd)")
+    init_p.add_argument("--force", action="store_true", help="Overwrite an existing codepulse.toml")
+
+    # 5. index
+    index_p = subparsers.add_parser("index", help="Full index of a repository")
+    index_p.add_argument("path", help="Repository path")
+    index_p.add_argument("--json", action="store_true")
+
+    # 6. update
+    update_p = subparsers.add_parser("update", help="Incremental (git-diff based when available) re-index")
+    update_p.add_argument("path", help="Repository path")
+    update_p.add_argument("--json", action="store_true")
+
+    # 7. symbol
+    symbol_p = subparsers.add_parser("symbol", help="Look up a symbol's definition")
+    symbol_p.add_argument("path", help="Repository path")
+    symbol_p.add_argument("symbol", help="Symbol name")
+    symbol_p.add_argument("--json", action="store_true")
+
+    # 8. refs
+    refs_p = subparsers.add_parser("refs", help="Direct references (callers + direct subclasses) of a symbol")
+    refs_p.add_argument("path", help="Repository path")
+    refs_p.add_argument("symbol", help="Symbol name")
+    refs_p.add_argument("--json", action="store_true")
+
+    # 9. callers
+    callers_p = subparsers.add_parser("callers", help="Callers of a symbol, direct and transitive")
+    callers_p.add_argument("path", help="Repository path")
+    callers_p.add_argument("symbol", help="Symbol name")
+    callers_p.add_argument("--depth", "-d", type=int, default=3)
+    callers_p.add_argument("--json", action="store_true")
+
+    # 10. callees
+    callees_p = subparsers.add_parser("callees", help="Symbols called by a symbol, direct and transitive")
+    callees_p.add_argument("path", help="Repository path")
+    callees_p.add_argument("symbol", help="Symbol name")
+    callees_p.add_argument("--depth", "-d", type=int, default=3)
+    callees_p.add_argument("--json", action="store_true")
+
+    # 11. similar
+    similar_p = subparsers.add_parser("similar", help="Semantically similar symbols")
+    similar_p.add_argument("path", help="Repository path")
+    similar_p.add_argument("symbol", help="Symbol name")
+    similar_p.add_argument("--threshold", type=float, default=0.75)
+    similar_p.add_argument("--limit", "-l", type=int, default=10)
+    similar_p.add_argument("--json", action="store_true")
+
+    # 12. status
+    status_p = subparsers.add_parser("status", help="Index freshness for a repository")
+    status_p.add_argument("path", help="Repository path")
+    status_p.add_argument("--json", action="store_true")
+
+    # 13. doctor
+    doctor_p = subparsers.add_parser("doctor", help="Environment/config diagnostics")
+    doctor_p.add_argument("path", nargs="?", default=None, help="Directory to check ignore rules against (default: cwd)")
+    doctor_p.add_argument("--json", action="store_true")
+
+    # 14. serve
+    serve_p = subparsers.add_parser("serve", help="Start the local API server (or the MCP server with --mcp)")
+    serve_p.add_argument("--host", default="127.0.0.1")
+    serve_p.add_argument("--port", type=int, default=8000)
+    serve_p.add_argument("--mcp", action="store_true", help="Start the MCP server (stdio transport) instead of the REST API")
+    serve_p.add_argument("--api-key", default=None, help="Raw API key to scope the MCP connection to (required with --mcp)")
 
     args = parser.parse_args()
 
@@ -279,6 +685,28 @@ def main() -> None:
         cmd_index_and_search(args)
     elif args.command == "impact":
         cmd_impact(args)
+    elif args.command == "init":
+        cmd_init(args)
+    elif args.command == "index":
+        cmd_index(args)
+    elif args.command == "update":
+        cmd_update(args)
+    elif args.command == "symbol":
+        cmd_symbol(args)
+    elif args.command == "refs":
+        cmd_refs(args)
+    elif args.command == "callers":
+        cmd_callers(args)
+    elif args.command == "callees":
+        cmd_callees(args)
+    elif args.command == "similar":
+        cmd_similar(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "doctor":
+        cmd_doctor(args)
+    elif args.command == "serve":
+        cmd_serve(args)
 
 
 if __name__ == "__main__":
