@@ -1,0 +1,54 @@
+# CodePulse CI (Phase 7.5, roadmap §37 item 7.5: "CI hook for
+# commit-triggered incremental indexing").
+#
+# Disclosed limitation, per this project's own "verify, don't assume"
+# discipline: this workflow file has been validated for YAML syntax and
+# its own individual shell steps have been run locally in this exact
+# sequence (see CODEPULSE_PROGRESS.md's Phase 7.5 entry) -- but it has
+# NOT been observed running on GitHub's own Actions infrastructure,
+# since no CI system exists anywhere in this repository and this
+# development environment has no way to actually trigger a real GitHub
+# Actions run. This is the same category of disclosed gap as Phase
+# 6.2/6.3/7.1/7.3 (code that can be written and locally exercised, but
+# not verified against infrastructure unavailable in this environment) --
+# not silently claimed as "done and running."
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CodePulse (editable, with dev extras)
+        run: pip install -e ".[dev]"
+      - name: Run the full test suite
+        run: pytest tests/ -q
+
+  incremental-index-self:
+    # Commit-triggered incremental indexing, per §37 item 7.5's own
+    # literal wording -- dogfoods CodePulse against its own repository
+    # on every push, exercising the real git-diff-based incremental
+    # path (Phase 3.1) rather than a synthetic example.
+    name: Commit-triggered incremental indexing (self-index)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history required for git-diff-based incremental detection
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install CodePulse
+        run: pip install -e .
+      - name: Incrementally index this repository's own commit
+        run: |
+          python -m codepulse.cli --db-url "sqlite:///${{ runner.temp }}/ci_index.db" update . --json

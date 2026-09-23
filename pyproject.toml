@@ -9,7 +9,20 @@ dependencies = [
     "fastapi>=0.111.0,<0.112.0",
     "uvicorn[standard]>=0.30.0,<0.31.0",
     "pydantic>=2.7.0,<2.8.0",
-    "pydantic-settings>=2.3.0,<2.4.0",
+    # Phase 7.5 (roadmap §37 item 7.5 "CI hook"): removed the previously
+    # declared `pydantic-settings>=2.3.0,<2.4.0` line -- confirmed by
+    # grep, nothing in `codepulse/` or `tests/` has EVER imported
+    # `pydantic_settings` (this project's own `config.py` uses plain
+    # `pydantic.BaseModel`, not `pydantic_settings.BaseSettings`; likely
+    # a vestigial early-scaffold declaration). It also directly
+    # conflicted with `mcp`'s (Phase 5.3, a REAL, used dependency) own
+    # real requirement of `pydantic-settings>=2.5.2`, making
+    # `pip install -e .` unresolvable -- discovered only once the
+    # unrelated package-discovery error (fixed just above, via
+    # `[tool.setuptools.packages.find]`) stopped masking it. `mcp`
+    # already declares its own correct `pydantic-settings` requirement
+    # as ITS OWN transitive dependency; codepulse does not need to
+    # declare one at all.
 
     # Storage (Phase 0 local-first: SQLite via SQLAlchemy + Alembic; Postgres/
     # pgvector are server-mode-only per the roadmap's storage design (§7) and
@@ -92,6 +105,21 @@ dev = [
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+# Phase 7.5 (roadmap §37 item 7.5 "CI hook for commit-triggered
+# incremental indexing"): a real, working `pip install -e .` is a
+# genuine prerequisite for any CI runner to do anything at all with
+# this project. Fixes a real, previously-disclosed packaging gap
+# (Phase 2.1's own finding, unfixed since): setuptools' automatic
+# package discovery finds TWO top-level packages at the repo root
+# (`alembic`, `codepulse`) and refuses to guess which to install,
+# so `pip install -e .` has failed outright since Phase 2.1. Explicit
+# `include` limits discovery to the one real installable package --
+# `alembic/` is this project's OWN migration script directory (run via
+# `alembic upgrade head`, never imported as a library), not a package
+# meant to be installed.
+[tool.setuptools.packages.find]
+include = ["codepulse*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
