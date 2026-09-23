@@ -2024,3 +2024,148 @@ class IndexingEngine:
             "callers": callers,
             "subclasses": subclasses,
         }
+
+    def find_similar_symbols(
+        self, query_text: str, exclude_symbol_name: str, repo_id: int,
+        threshold: float = 0.75, limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """
+        Phase 5.1 (roadmap §12 "related_symbols"). Shared intelligence-
+        core semantic-similarity lookup -- extracted from what was
+        previously inline-only logic in `POST /v1/symbols/{id}/similar`,
+        so the new §12 context-bundle assembler (`get_context_bundle`)
+        can reuse it instead of duplicating vector-search logic a
+        second time.
+
+        Fixed a real, pre-existing repository-isolation gap while
+        extracting this: the original inline route logic called
+        `self.vector_index.search(...)` with NO `repo_id` filtering at
+        all (unlike `IndexingEngine.search()`'s own "semantic" branch,
+        repo-scoped since Phase 0.6) -- a caller could receive another
+        repository's "similar" symbols. This method filters candidates
+        by `meta.get("repo_id") == repo_id`, over-fetching the entire
+        vector index pool first (`top_k=len(self.vector_index.doc_ids)`)
+        exactly like `search()`'s own established `_repo_filter`
+        pattern, rather than trusting a small `top_k` to happen to
+        contain enough same-repository results.
+        """
+        query_vec = self.embedder.encode(query_text)
+        pool = len(self.vector_index.doc_ids)
+        vector_res = self.vector_index.search(query_vec, top_k=pool) if pool else []
+
+        similar_items: list[dict[str, Any]] = []
+        for r in vector_res:
+            meta = r.get("metadata", {})
+            if meta.get("repo_id") != repo_id:
+                continue
+            if meta.get("symbol_name") == exclude_symbol_name:
+                continue
+            if r["relevance_score"] >= threshold:
+                similar_items.append({
+                    "symbol_name": meta.get("symbol_name"),
+                    "file_path": meta.get("file_path"),
+                    "similarity": round(r["similarity"], 4),
+                    "relevance_score": round(r["relevance_score"], 4),
+                })
+            if len(similar_items) >= limit:
+                break
+        return similar_items
+
+    def get_context_bundle(
+        self,
+        symbol_name: str,
+        file_path: str,
+        repo_id: int,
+        signature: str = "",
+        docstring: str | None = None,
+        body: str = "",
+        include_body: bool = False,
+        max_related: int = 10,
+    ) -> dict[str, Any]:
+        """
+        Phase 5.1 (roadmap §12 "Agent-Native Retrieval / Context API"):
+        the shared context-bundle assembly function §12 itself requires
+        be "shared by REST + MCP" -- `POST /v1/agent/context` (Phase
+        5.2) and the MCP `get_context` tool (Phase 5.3) both call this
+        directly; neither duplicates the assembly logic.
+
+        Composes three ALREADY-EXISTING, independently-tested
+        capabilities -- no new graph/retrieval algorithm is introduced
+        here, purely assembly: `CallGraphBuilder.get_callers`/
+        `get_callees` (reused with `max_depth=1`, exactly like
+        `analyze_references` already does, for `callers`/`callees`) and
+        `find_similar_symbols` (above) for `related_symbols`.
+
+        Token-efficiency rules, implemented exactly per §12's own
+        numbered list: (1) `definition.body` is `None` unless
+        `include_body=True` -- signature+docstring are always included,
+        the full body only on explicit request; (2) `callers`/`callees`
+        are capped at `max_related` (default 10), already
+        deterministically ordered by confidence then call-count (Phase
+        4.2's own established sort, not a new ranking); (3)
+        `snapshot_commit` is always present -- the most recent
+        `RepositorySnapshotModel.commit_sha` for this repository, `None`
+        (honestly, never fabricated) for a non-git repository or one
+        never successfully indexed; (4) `truncated` is `True` whenever
+        anything was shortened (the body was omitted, or `callers`/
+        `callees` had more entries than `max_related`), so a caller/
+        agent always knows when a field was silently capped.
+
+        Repository-scoped via `self.call_graphs.get(repo_id)`, matching
+        every other `analyze_*` method's own established pattern --
+        never the singular `self.call_graph` alias.
+        """
+        repo_call_graph = self.call_graphs.get(repo_id)
+        if repo_call_graph:
+            all_callers = repo_call_graph.get_callers(symbol_name, file_path, max_depth=1)
+            all_callees = repo_call_graph.get_callees(symbol_name, file_path, max_depth=1)
+        else:
+            all_callers, all_callees = [], []
+
+        callers = all_callers[:max_related]
+        callees = all_callees[:max_related]
+
+        query_text = f"{signature}\n{docstring or ''}\n{body[:500]}"
+        related_raw = self.find_similar_symbols(query_text, symbol_name, repo_id, limit=max_related)
+        related_symbols = [
+            {
+                "symbol": r["symbol_name"],
+                "file": r["file_path"],
+                "relevance": r["relevance_score"],
+                "reason": "semantic_similarity",
+            }
+            for r in related_raw
+        ]
+
+        session = self.storage.get_session()
+        try:
+            snapshot = (
+                session.query(RepositorySnapshotModel)
+                .filter(RepositorySnapshotModel.repo_id == repo_id)
+                .order_by(RepositorySnapshotModel.id.desc())
+                .first()
+            )
+            snapshot_commit = snapshot.commit_sha if snapshot else None
+        finally:
+            session.close()
+
+        truncated = (
+            (not include_body)
+            or (len(all_callers) > max_related)
+            or (len(all_callees) > max_related)
+        )
+
+        return {
+            "symbol": symbol_name,
+            "file": file_path,
+            "definition": {
+                "signature": signature,
+                "docstring": docstring,
+                "body": body if include_body else None,
+            },
+            "callers": callers,
+            "callees": callees,
+            "related_symbols": related_symbols,
+            "snapshot_commit": snapshot_commit,
+            "truncated": truncated,
+        }

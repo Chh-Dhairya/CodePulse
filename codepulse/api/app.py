@@ -124,6 +124,16 @@ class ImpactAnalysisRequest(BaseModel):
     depth: int = 3
 
 
+class AgentContextRequest(BaseModel):
+    # Phase 5.2 (roadmap §12/§37 item 5.2): the roadmap's own literal
+    # path is `/v1/agent/context` -- no `{symbol_id}` path placeholder
+    # -- so the target symbol is identified in the request body instead
+    # of the URL, unlike every other symbol-scoped endpoint in this API.
+    symbol_id: int
+    include_body: bool = False
+    max_related: int = 10
+
+
 class IdeSearchRequest(BaseModel):
     repository_id: Optional[int] = 1
     selected_text: str
@@ -423,26 +433,24 @@ def find_similar_code(
             raise HTTPException(status_code=404, detail="Symbol not found")
         auth.authorize_repository(sym.file.repo_id)
 
+        # Phase 5.1 (roadmap §12 "related_symbols"): moved into the
+        # shared `IndexingEngine.find_similar_symbols` intelligence-core
+        # method so §12's context-bundle assembler can reuse it instead
+        # of duplicating semantic-similarity logic a second time. Fixed
+        # a real, pre-existing repository-isolation gap while extracting
+        # it: the vector search here was NOT scoped to `repo_id` at all
+        # (unlike `IndexingEngine.search()`'s own "semantic" branch,
+        # which has been repo-scoped since Phase 0.6) -- a caller could
+        # receive another repository's "similar" symbols. The shared
+        # method now filters by `repo_id` exactly like `search()` does.
         query_text = f"{sym.signature}\n{sym.docstring or ''}\n{sym.body[:500]}"
-        query_vec = indexing_engine.embedder.encode(query_text)
-        vector_res = indexing_engine.vector_index.search(query_vec, top_k=req.limit + 1)
-
-        similar_items = []
-        for r in vector_res:
-            meta = r.get("metadata", {})
-            if meta.get("symbol_name") == sym.name:
-                continue  # skip self
-            if r["relevance_score"] >= req.threshold:
-                similar_items.append({
-                    "symbol_name": meta.get("symbol_name"),
-                    "file_path": meta.get("file_path"),
-                    "similarity": round(r["similarity"], 4),
-                    "relevance_score": round(r["relevance_score"], 4),
-                })
+        similar_items = indexing_engine.find_similar_symbols(
+            query_text, sym.name, sym.file.repo_id, threshold=req.threshold, limit=req.limit
+        )
 
         return {
             "query_symbol": {"id": sym.id, "name": sym.name},
-            "similar": similar_items[: req.limit],
+            "similar": similar_items,
         }
     finally:
         session.close()
@@ -505,6 +513,41 @@ def get_symbol_references(symbol_id: int, auth: AuthorizedKey = Depends(require_
         # file, never a client-suppliable parameter).
         return indexing_engine.analyze_references(
             sym.name, sym.file.path if sym.file else "", sym.file.repo_id
+        )
+    finally:
+        session.close()
+
+
+# -------------------------------------------------------------
+# 6c. Agent Context Bundle (POST /v1/agent/context)
+# -------------------------------------------------------------
+@app.post("/v1/agent/context")
+def get_agent_context(req: AgentContextRequest, auth: AuthorizedKey = Depends(require_api_key)):
+    session = storage_manager.get_session()
+    try:
+        sym = session.query(SymbolModel).filter(SymbolModel.id == req.symbol_id).first()
+        if not sym:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        if not sym.file:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        auth.authorize_repository(sym.file.repo_id)
+
+        # Phase 5.2 (roadmap §37 item 5.2; §12 "Agent-Native Retrieval /
+        # Context API"): thin adapter over the shared
+        # `IndexingEngine.get_context_bundle` intelligence-core method
+        # (Phase 5.1) -- same repository-isolation pattern as every
+        # other symbol-scoped route (`sym.file.repo_id` resolved from
+        # the requested symbol's own file, never a client-suppliable
+        # parameter).
+        return indexing_engine.get_context_bundle(
+            sym.name,
+            sym.file.path if sym.file else "",
+            sym.file.repo_id,
+            signature=sym.signature,
+            docstring=sym.docstring,
+            body=sym.body,
+            include_body=req.include_body,
+            max_related=req.max_related,
         )
     finally:
         session.close()
