@@ -14,6 +14,7 @@ from sqlalchemy import (
     Float,
     UniqueConstraint,
     create_engine,
+    event,
     inspect,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
@@ -415,6 +416,30 @@ class StorageManager:
             db_url = get_settings().db_url
         self.db_url = db_url
         self.engine = create_engine(db_url, echo=False)
+
+        # Backend-hardening addition (not a roadmap sprint item): SQLite
+        # disables foreign-key enforcement by default, per-connection --
+        # every ON DELETE CASCADE declared on a ForeignKey() above (e.g.
+        # CallEdge.repo_id, APIKeyRepositoryModel.api_key_id/repo_id,
+        # IndexJobModel.repo_id, RepositorySnapshotModel.repo_id) was
+        # previously inert, a real, disclosed gap (see CODEPULSE_PROGRESS.md's
+        # "Known technical debt"). Scoped to THIS engine instance only
+        # (not the global sqlalchemy.engine.Engine class) so it applies to
+        # every connection the application makes through a StorageManager,
+        # while deliberately NOT touching Alembic's own, entirely separate
+        # `engine_from_config(...)` connection (alembic/env.py) -- migration
+        # execution is unaffected by this change. Guarded to SQLite only,
+        # since PRAGMA is SQLite-specific syntax and Postgres (Phase 7.1,
+        # not implemented) enforces foreign keys by default already, no
+        # pragma needed.
+        @event.listens_for(self.engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+            if self.engine.dialect.name != "sqlite":
+                return
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.create_tables()
 
