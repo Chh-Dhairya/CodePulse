@@ -1032,3 +1032,43 @@ def revoke_key(key_id: int, auth: AuthorizedKey = Depends(require_api_key)):
         "id": summary.id,
         "revoked_at": summary.revoked_at.isoformat() if summary.revoked_at else None,
     }
+
+
+# -------------------------------------------------------------
+# 15. Module Structure (GET /v1/repositories/{repo_id}/modules)
+#
+# Backend-hardening addition (not a roadmap sprint item) -- gives Phase
+# 4.3's `ModuleGraphBuilder`/`IndexingEngine.analyze_module_structure`
+# its first query surface. That milestone's own explicit approved scope
+# deliberately built the engine capability with NO REST/CLI/MCP caller
+# ("library/shared-core only... a future one can, through this exact
+# method, without duplicating any of ModuleGraphBuilder's own
+# construction logic" -- see that method's own docstring); this is that
+# future caller. Thin wrapper only: no clustering/ranking logic lives
+# here, exactly matching every other REST route's relationship to the
+# shared intelligence core.
+# -------------------------------------------------------------
+@app.get("/v1/repositories/{repo_id}/modules")
+def get_repository_modules(repo_id: int, auth: AuthorizedKey = Depends(require_api_key)):
+    """
+    Computed fresh on every call from the current in-memory parse-result
+    snapshot (unchanged from `analyze_module_structure`'s own documented
+    behavior -- no persistence, no incremental machinery). Returns an
+    empty graph, not an error, for a repository with no cached parse
+    results this process lifetime (e.g. before its first index, or
+    after a restart) -- the same restart-behavior contract every other
+    in-memory-graph-backed endpoint (impact-analysis, references)
+    already has.
+    """
+    auth.authorize_repository(repo_id)
+    module_graph = indexing_engine.analyze_module_structure(repo_id)
+    return {
+        "repository_id": repo_id,
+        "clusters": module_graph.clusters,
+        # §11's own literal heuristic wording, kept as raw, unlabeled
+        # degree data -- see ModuleGraphBuilder.rank_by_inbound/outbound's
+        # own docstrings for why no "entry point"/"utility" label is
+        # attached here.
+        "ranked_by_inbound": module_graph.rank_by_inbound(),
+        "ranked_by_outbound": module_graph.rank_by_outbound(),
+    }

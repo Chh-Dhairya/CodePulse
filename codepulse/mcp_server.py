@@ -40,6 +40,13 @@ query mirrors `GET /v1/symbols/{id}`'s own tested query exactly
 plain parameterized DB read (not a graph algorithm), not extracted into
 a third shared location this milestone; see CODEPULSE_PROGRESS.md's
 Phase 5.3 entry for the explicit reasoning.
+
+Backend-hardening addition (not a roadmap sprint item; §13's own
+literal tool list names exactly 7): `module_structure` -- an 8th tool,
+giving Phase 4.3's `IndexingEngine.analyze_module_structure` (built
+with no MCP caller at the time, by that milestone's own explicit
+approved scope) its first MCP surface, matching the REST/CLI query
+surfaces added in the same pass.
 """
 from __future__ import annotations
 
@@ -246,5 +253,19 @@ def build_mcp_server(
             signature=loaded["signature"], docstring=loaded["docstring"], body=loaded["body"],
             include_body=include_body, max_related=max_related,
         )
+
+    @mcp.tool()
+    def module_structure(repository_id: int) -> dict[str, Any]:
+        """Module clusters + raw inbound/outbound degree rankings for a repository's file-level import graph (Phase 4.3's ModuleGraphBuilder, reused unmodified)."""
+        auth_error = _authorize(repository_id)
+        if auth_error:
+            return auth_error
+        module_graph = engine.analyze_module_structure(repository_id)
+        return {
+            "repository_id": repository_id,
+            "clusters": module_graph.clusters,
+            "ranked_by_inbound": module_graph.rank_by_inbound(),
+            "ranked_by_outbound": module_graph.rank_by_outbound(),
+        }
 
     return mcp

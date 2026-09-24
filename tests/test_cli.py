@@ -210,6 +210,25 @@ def test_cmd_status_reports_not_indexed_for_an_unindexed_path(tmp_path, capsys):
     assert body["indexed"] is False
 
 
+def test_cmd_modules_reports_clusters_and_rankings(tmp_path, capsys):
+    """Backend-hardening addition (not a roadmap sprint item) -- CLI
+    exposure of Phase 4.3's module-clustering engine capability
+    (IndexingEngine.analyze_module_structure), matching the same
+    thin-wrapper contract every other cmd_* command follows."""
+    _set_db(tmp_path, "cli_modules.db")
+    repo = _make_repo(tmp_path, "repo_modules")
+    cli.cmd_modules(argparse.Namespace(path=str(repo), json=True))
+    body = _read_json(capsys)
+    assert body["repository_id"] > 0
+    assert isinstance(body["clusters"], list)
+    assert len(body["clusters"]) >= 1
+    # mod.py is the repo's only file -- it must appear in exactly one cluster.
+    all_files = [f for cluster in body["clusters"] for f in cluster["files"]]
+    assert all_files == ["mod.py"]
+    assert {row["file"] for row in body["ranked_by_inbound"]} == {"mod.py"}
+    assert {row["file"] for row in body["ranked_by_outbound"]} == {"mod.py"}
+
+
 def test_cmd_doctor_reports_all_checks_ok_in_a_healthy_environment(tmp_path, capsys):
     _set_db(tmp_path, "cli_doctor.db")
     repo = _make_repo(tmp_path, "repo_doctor")

@@ -496,6 +496,43 @@ def cmd_status(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_modules(args: argparse.Namespace) -> None:
+    """
+    Module clusters + raw inbound/outbound degree rankings, via
+    IndexingEngine.analyze_module_structure (Phase 4.3's ModuleGraphBuilder,
+    reused unmodified). Backend-hardening addition (not a roadmap sprint
+    item) -- this engine capability existed since Phase 4.3 with no CLI
+    caller until now.
+    """
+    engine = IndexingEngine()
+    result = engine.index_directory(args.path, repo_name=os.path.basename(args.path))
+    module_graph = engine.analyze_module_structure(result["repository_id"])
+    payload = {
+        "repository_id": result["repository_id"],
+        "clusters": module_graph.clusters,
+        "ranked_by_inbound": module_graph.rank_by_inbound(),
+        "ranked_by_outbound": module_graph.rank_by_outbound(),
+    }
+    if args.json:
+        _print_json(payload)
+        return
+
+    tree = Tree(f"[bold magenta]Module clusters ({len(payload['clusters'])})[/bold magenta]")
+    for cluster in payload["clusters"]:
+        branch = tree.add(f"[bold]Cluster {cluster['id']}[/bold] ({len(cluster['files'])} files)")
+        for f in cluster["files"]:
+            branch.add(f)
+    console.print(tree)
+
+    table = Table(title="Top files by inbound edges (possible API/entry points, per §11's literal heuristic)", border_style="cyan")
+    table.add_column("File", style="yellow")
+    table.add_column("In", justify="right")
+    table.add_column("Out", justify="right")
+    for row in payload["ranked_by_inbound"][:10]:
+        table.add_row(row["file"], str(row["in_degree"]), str(row["out_degree"]))
+    console.print(table)
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Environment/config diagnostics -- embedding model loads? DB reachable? ignore rules active?"""
     from codepulse.config import get_settings
@@ -655,6 +692,11 @@ def main() -> None:
     status_p.add_argument("path", help="Repository path")
     status_p.add_argument("--json", action="store_true")
 
+    # 12b. modules
+    modules_p = subparsers.add_parser("modules", help="Module clusters + inbound/outbound degree rankings")
+    modules_p.add_argument("path", help="Repository path")
+    modules_p.add_argument("--json", action="store_true")
+
     # 13. doctor
     doctor_p = subparsers.add_parser("doctor", help="Environment/config diagnostics")
     doctor_p.add_argument("path", nargs="?", default=None, help="Directory to check ignore rules against (default: cwd)")
@@ -703,6 +745,8 @@ def main() -> None:
         cmd_similar(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "modules":
+        cmd_modules(args)
     elif args.command == "doctor":
         cmd_doctor(args)
     elif args.command == "serve":

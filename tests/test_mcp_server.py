@@ -7,7 +7,10 @@ authorization (see CODEPULSE_PROGRESS.md's standing-deviation notice).
 Verifies §13's own explicit requirements directly:
   - The exact 7 named tools exist: search_code, get_symbol,
     find_callers, find_callees, impact_analysis, find_similar,
-    get_context.
+    get_context. Plus an 8th, `module_structure` -- a backend-hardening
+    addition (not in §13's own literal list) giving Phase 4.3's module
+    clustering its first MCP surface; see codepulse/mcp_server.py's own
+    module docstring for the disclosure.
   - Each tool calls straight into `IndexingEngine` -- no parallel
     graph/retrieval implementation (proved by cross-checking tool
     output against the equivalent `IndexingEngine` method's own direct
@@ -119,14 +122,14 @@ def _symbol_id(engine, repo_id, name):
 # --- setup / authentication -----------------------------------------------
 
 @pytest.mark.asyncio
-async def test_build_mcp_server_registers_exactly_the_seven_named_tools(tmp_path, shared_embedder):
+async def test_build_mcp_server_registers_exactly_the_eight_named_tools(tmp_path, shared_embedder):
     engine, result = _index_repo(tmp_path, "repo_tools", shared_embedder, "mcp_tools.db")
     created = create_api_key(engine.storage, name="k", repository_ids=[result["repository_id"]])
     mcp = build_mcp_server(engine.storage, engine, created.raw_key)
     tools = {t.name for t in await mcp.list_tools()}
     assert tools == {
         "search_code", "get_symbol", "find_callers", "find_callees",
-        "impact_analysis", "find_similar", "get_context",
+        "impact_analysis", "find_similar", "get_context", "module_structure",
     }
 
 
@@ -217,6 +220,25 @@ async def test_search_code_tool_returns_results_for_an_authorized_repository(tmp
     assert len(body["results"]) >= 1
 
 
+@pytest.mark.asyncio
+async def test_module_structure_tool_matches_engine_result_exactly(tmp_path, shared_embedder):
+    """Thin-wrapper proof: the tool's output equals engine.analyze_module_structure's own
+    return value (via ModuleGraphBuilder's public attributes/methods), not a re-derived copy."""
+    engine, result = _index_repo(tmp_path, "repo_modules_tool", shared_embedder, "mcp_modules.db")
+    repo_id = result["repository_id"]
+    created = create_api_key(engine.storage, name="k", repository_ids=[repo_id])
+    mcp = build_mcp_server(engine.storage, engine, created.raw_key)
+
+    module_graph = engine.analyze_module_structure(repo_id)
+
+    _, body = await mcp.call_tool("module_structure", {"repository_id": repo_id})
+    assert "error" not in body
+    assert body["repository_id"] == repo_id
+    assert body["clusters"] == module_graph.clusters
+    assert body["ranked_by_inbound"] == module_graph.rank_by_inbound()
+    assert body["ranked_by_outbound"] == module_graph.rank_by_outbound()
+
+
 # --- structured errors, not exceptions -------------------------------------
 
 @pytest.mark.asyncio
@@ -275,6 +297,7 @@ async def test_mcp_connection_never_sees_another_repositorys_data_through_any_to
         ("find_similar", {"symbol_id": b_helper_id}),
         ("get_context", {"symbol_id": b_helper_id}),
         ("search_code", {"query": "helper", "repository_id": r_b["repository_id"]}),
+        ("module_structure", {"repository_id": r_b["repository_id"]}),
     ]:
         _, body = await mcp_a.call_tool(tool_name, args)
         assert body.get("error") == "repository_not_authorized", (
