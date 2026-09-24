@@ -18,9 +18,15 @@ Deliberately NOT in scope for Phase 1.1 (do not infer these from later
 Phase 1 milestones): request-header parsing, HTTP 401/403 responses,
 FastAPI `Depends()` wiring, rate limiting (roadmap §15's viewer/
 indexer/admin roles were Phase 7 / B25 scope -- `create_api_key` below
-now accepts a `role` per repository grant, see its own docstring), a
-mutating revoke() flow (only the `revoked_at` schema column exists),
-key expiry, audit logging.
+now accepts a `role` per repository grant, see its own docstring), key
+expiry, audit logging.
+
+Backend-hardening addition (not a roadmap sprint item): a real,
+mutating `revoke_api_key` now exists below, plus `APIKeySummary`/
+`APIKeyGrant`/`get_api_key_repository_ids`/
+`list_api_keys_for_repositories` -- the key-management primitives
+`codepulse/api/app.py`'s new `/v1/admin/keys` endpoints are thin
+wrappers over. `create_api_key` itself is unchanged by this addition.
 
 This module lives outside `codepulse/indexer/` deliberately: per CLAUDE.md
 §3, "authentication belongs at the API boundary; the intelligence core
@@ -162,6 +168,147 @@ def create_api_key(
     except Exception:
         session.rollback()
         raise
+    finally:
+        session.close()
+
+
+@dataclass(frozen=True)
+class APIKeyGrant:
+    """One (repository, role) grant for an API key -- mirrors one row of
+    `APIKeyRepositoryModel`."""
+    repository_id: int
+    role: str
+
+
+@dataclass(frozen=True)
+class APIKeySummary:
+    """
+    A non-secret view of a persisted API key -- backend-hardening
+    addition (key-management REST endpoints), never includes the raw
+    key or its hash, only what `APIKeyModel` itself already exposes for
+    display purposes (see that model's own `key_prefix` rationale).
+    `grants` is the key's COMPLETE grant list, unfiltered -- a caller
+    that must not disclose a key's access to repositories it doesn't
+    itself administer (e.g. an admin-role-gated REST endpoint) is
+    responsible for filtering `.grants` down to its own visible set
+    before returning it to a client; the functions below make no
+    assumption about who is allowed to see what.
+    """
+    id: int
+    name: str
+    key_prefix: str
+    created_at: datetime
+    revoked_at: datetime | None
+    grants: list[APIKeyGrant]
+
+
+def get_api_key_repository_ids(storage: StorageManager, key_id: int) -> list[int] | None:
+    """
+    Returns the repository ids `key_id` is granted to (possibly empty,
+    for an unscoped key), or `None` if no `APIKeyModel` with this id
+    exists at all -- the `None`/non-`None` distinction is what lets a
+    caller (an admin-role-gated REST endpoint) return a real 404
+    separately from an authorization decision.
+    """
+    session = storage.get_session()
+    try:
+        api_key = session.query(APIKeyModel).filter(APIKeyModel.id == key_id).first()
+        if api_key is None:
+            return None
+        return [
+            row.repo_id
+            for row in session.query(APIKeyRepositoryModel)
+            .filter(APIKeyRepositoryModel.api_key_id == key_id)
+            .all()
+        ]
+    finally:
+        session.close()
+
+
+def list_api_keys_for_repositories(storage: StorageManager, repository_ids: set[int]) -> list[APIKeySummary]:
+    """
+    Returns every API key that holds AT LEAST ONE grant among
+    `repository_ids`, ordered by id. Each returned `APIKeySummary`
+    carries its FULL grant list (see that class's own docstring for why
+    filtering it down is the caller's job, not this function's).
+    """
+    if not repository_ids:
+        return []
+    session = storage.get_session()
+    try:
+        key_ids = {
+            row.api_key_id
+            for row in session.query(APIKeyRepositoryModel.api_key_id)
+            .filter(APIKeyRepositoryModel.repo_id.in_(repository_ids))
+            .all()
+        }
+        if not key_ids:
+            return []
+        keys = (
+            session.query(APIKeyModel)
+            .filter(APIKeyModel.id.in_(key_ids))
+            .order_by(APIKeyModel.id)
+            .all()
+        )
+        grants_by_key: dict[int, list[APIKeyGrant]] = {k.id: [] for k in keys}
+        for row in (
+            session.query(APIKeyRepositoryModel)
+            .filter(APIKeyRepositoryModel.api_key_id.in_(key_ids))
+            .all()
+        ):
+            grants_by_key[row.api_key_id].append(APIKeyGrant(repository_id=row.repo_id, role=row.role))
+        return [
+            APIKeySummary(
+                id=k.id,
+                name=k.name,
+                key_prefix=k.key_prefix,
+                created_at=k.created_at,
+                revoked_at=k.revoked_at,
+                grants=grants_by_key[k.id],
+            )
+            for k in keys
+        ]
+    finally:
+        session.close()
+
+
+def revoke_api_key(storage: StorageManager, key_id: int) -> APIKeySummary | None:
+    """
+    Sets `revoked_at` on the given key if it exists and is not already
+    revoked -- the mutating revoke() flow this module's own docstring
+    has disclosed as missing since Phase 1.1 (only the schema column
+    existed; `verify_api_key` already respects it defensively, so a
+    revoked key stops authenticating immediately once this runs).
+    Idempotent: calling this again on an already-revoked key leaves its
+    original `revoked_at` untouched rather than overwriting it with a
+    later timestamp. Returns the key's up-to-date `APIKeySummary`
+    (full, unfiltered grant list -- same caller responsibility as
+    `list_api_keys_for_repositories`), or `None` if no key with this id
+    exists.
+    """
+    session = storage.get_session()
+    try:
+        api_key = session.query(APIKeyModel).filter(APIKeyModel.id == key_id).first()
+        if api_key is None:
+            return None
+        if api_key.revoked_at is None:
+            api_key.revoked_at = datetime.utcnow()
+            session.commit()
+            session.refresh(api_key)
+        grants = [
+            APIKeyGrant(repository_id=row.repo_id, role=row.role)
+            for row in session.query(APIKeyRepositoryModel)
+            .filter(APIKeyRepositoryModel.api_key_id == key_id)
+            .all()
+        ]
+        return APIKeySummary(
+            id=api_key.id,
+            name=api_key.name,
+            key_prefix=api_key.key_prefix,
+            created_at=api_key.created_at,
+            revoked_at=api_key.revoked_at,
+            grants=grants,
+        )
     finally:
         session.close()
 

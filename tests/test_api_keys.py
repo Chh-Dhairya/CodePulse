@@ -29,10 +29,14 @@ from sqlalchemy.exc import IntegrityError
 
 from codepulse.auth import (
     API_KEY_PREFIX,
+    APIKeyGrant,
     CreatedAPIKey,
     create_api_key,
     generate_raw_api_key,
+    get_api_key_repository_ids,
     hash_api_key,
+    list_api_keys_for_repositories,
+    revoke_api_key,
     verify_api_key,
 )
 from codepulse.config import reset_settings
@@ -228,3 +232,82 @@ def test_create_api_key_rejects_nonexistent_repository_and_leaves_no_partial_sta
         )
     finally:
         session.close()
+
+
+# --- Backend-hardening addition: revoke_api_key / get_api_key_repository_ids / --
+# --- list_api_keys_for_repositories (not a roadmap sprint item) -----------------
+
+def test_revoke_api_key_sets_revoked_at_and_the_key_stops_verifying(storage):
+    result = create_api_key(storage, name="to-be-revoked")
+    assert verify_api_key(storage, result.raw_key) == result.id
+
+    summary = revoke_api_key(storage, result.id)
+
+    assert summary.id == result.id
+    assert summary.revoked_at is not None
+    assert verify_api_key(storage, result.raw_key) is None
+
+
+def test_revoke_api_key_is_idempotent(storage):
+    result = create_api_key(storage, name="to-be-revoked-twice")
+
+    first = revoke_api_key(storage, result.id)
+    second = revoke_api_key(storage, result.id)
+
+    assert first.revoked_at == second.revoked_at, (
+        "revoking an already-revoked key must not overwrite its original "
+        "revoked_at with a later timestamp"
+    )
+
+
+def test_revoke_api_key_returns_none_for_an_unknown_key_id(storage):
+    assert revoke_api_key(storage, 999999) is None
+
+
+def test_get_api_key_repository_ids_returns_the_real_grants(storage):
+    session = storage.get_session()
+    try:
+        repo = RepositoryModel(name="r1", url="file:///r1")
+        session.add(repo)
+        session.commit()
+        repo_id = repo.id
+    finally:
+        session.close()
+
+    result = create_api_key(storage, name="scoped-key", repository_ids=[repo_id], role="admin")
+
+    assert get_api_key_repository_ids(storage, result.id) == [repo_id]
+
+
+def test_get_api_key_repository_ids_returns_empty_list_for_an_unscoped_key(storage):
+    result = create_api_key(storage, name="unscoped-key")
+    assert get_api_key_repository_ids(storage, result.id) == []
+
+
+def test_get_api_key_repository_ids_returns_none_for_an_unknown_key_id(storage):
+    assert get_api_key_repository_ids(storage, 999999) is None
+
+
+def test_list_api_keys_for_repositories_returns_only_keys_with_a_matching_grant(storage):
+    session = storage.get_session()
+    try:
+        repo_a = RepositoryModel(name="ra", url="file:///ra")
+        repo_b = RepositoryModel(name="rb", url="file:///rb")
+        session.add_all([repo_a, repo_b])
+        session.commit()
+        repo_a_id, repo_b_id = repo_a.id, repo_b.id
+    finally:
+        session.close()
+
+    key_a = create_api_key(storage, name="key-a", repository_ids=[repo_a_id], role="admin")
+    create_api_key(storage, name="key-b", repository_ids=[repo_b_id], role="admin")
+
+    summaries = list_api_keys_for_repositories(storage, {repo_a_id})
+
+    assert {s.id for s in summaries} == {key_a.id}
+    assert summaries[0].grants == [APIKeyGrant(repository_id=repo_a_id, role="admin")]
+
+
+def test_list_api_keys_for_repositories_with_empty_set_returns_empty_list(storage):
+    create_api_key(storage, name="some-key")
+    assert list_api_keys_for_repositories(storage, set()) == []

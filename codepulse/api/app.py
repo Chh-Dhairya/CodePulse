@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from codepulse.api.errors import _record_api_error, error_json_response, install_error_handlers
 from codepulse.api.security import AuthorizedKey, require_api_key
+from codepulse.auth import create_api_key, get_api_key_repository_ids, list_api_keys_for_repositories, revoke_api_key
 from codepulse.config import get_settings
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.ingestion_safety import IngestionSafetyError, validate_git_url, validate_local_path
@@ -218,6 +219,17 @@ class FeedbackRequest(BaseModel):
     search_id: str
     result_id: int
     feedback: str  # "relevant", "irrelevant", "perfect"
+
+
+class CreateAPIKeyRequest(BaseModel):
+    name: str
+    # Empty list = an unscoped key (authenticated but authorized for no
+    # repository-scoped operation, matching Phase 1.2's own "no
+    # wildcard/superuser key" design) -- see create_key's own
+    # authorization comment for why this is the one case that doesn't
+    # require admin on anything.
+    repository_ids: list[int] = Field(default_factory=list)
+    role: str = "viewer"
 
 
 # -------------------------------------------------------------
@@ -907,4 +919,116 @@ def get_job_status(job_id: str, auth: AuthorizedKey = Depends(require_api_key)):
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         "error": job.error_message,
         "result": job.result,
+    }
+
+
+# -------------------------------------------------------------
+# 14. API Key Management (POST/GET /v1/admin/keys, DELETE /v1/admin/keys/{id})
+#
+# Backend-hardening addition (not a roadmap sprint item) -- gives §15's
+# `admin` role ("all + manage keys/repos") its first real REST surface;
+# before this, `create_api_key`/`revoke_api_key` were Python-function-only
+# operations (disclosed as a known gap since Phase 7.2). Thin wrappers
+# over codepulse.auth's key-management primitives, matching this API's
+# established "shared logic lives outside app.py" pattern.
+#
+# Authorization model, deliberately simple and symmetric (no separate
+# "key owner" concept exists in the schema -- adding one would need its
+# own migration, out of this addition's scope): creating a key scoped to
+# specific repositories, or revoking a key that holds any grant, both
+# require the caller to hold "admin" role on EVERY repository involved --
+# never on a subset, so one admin can never silently create/revoke access
+# to a repository a DIFFERENT admin, not the caller, actually administers.
+# An unscoped key (no repository_ids) has no specific repository to check
+# admin-on; for that one case, the caller must hold "admin" somewhere
+# (proving it is genuinely an admin-role key, not merely authenticated).
+# -------------------------------------------------------------
+def _require_admin_somewhere(auth: AuthorizedKey, action: str) -> None:
+    if not any(role == "admin" for role in auth.repository_roles.values()):
+        raise HTTPException(
+            status_code=403,
+            detail=f"{action} an unscoped API key requires admin role on at least one repository.",
+        )
+
+
+@app.post("/v1/admin/keys", status_code=201)
+def create_key(req: CreateAPIKeyRequest, auth: AuthorizedKey = Depends(require_api_key)):
+    if req.repository_ids:
+        for repository_id in req.repository_ids:
+            auth.authorize_role(repository_id, "admin")
+    else:
+        _require_admin_somewhere(auth, "Creating")
+
+    try:
+        created = create_api_key(
+            storage_manager, req.name, repository_ids=req.repository_ids or None, role=req.role
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "id": created.id,
+        "name": created.name,
+        "key_prefix": created.key_prefix,
+        "created_at": created.created_at.isoformat(),
+        # The raw key is returned exactly once, here -- it is never
+        # persisted and cannot be recovered by any later call (matches
+        # codepulse.auth.create_api_key's own documented lifecycle).
+        "api_key": created.raw_key,
+        "repository_ids": req.repository_ids,
+        "role": req.role,
+    }
+
+
+@app.get("/v1/admin/keys")
+def list_keys(auth: AuthorizedKey = Depends(require_api_key)):
+    admin_repository_ids = {
+        repository_id for repository_id, role in auth.repository_roles.items() if role == "admin"
+    }
+    if not admin_repository_ids:
+        raise HTTPException(
+            status_code=403, detail="Listing API keys requires admin role on at least one repository."
+        )
+
+    summaries = list_api_keys_for_repositories(storage_manager, admin_repository_ids)
+    return {
+        "keys": [
+            {
+                "id": s.id,
+                "name": s.name,
+                "key_prefix": s.key_prefix,
+                "created_at": s.created_at.isoformat(),
+                "revoked_at": s.revoked_at.isoformat() if s.revoked_at else None,
+                # Only the grants the CALLER administers are disclosed --
+                # a key visible here because it shares one admin
+                # repository with the caller may hold OTHER grants on
+                # repositories the caller has no rights over; those are
+                # never included, deliberately.
+                "grants": [
+                    {"repository_id": g.repository_id, "role": g.role}
+                    for g in s.grants
+                    if g.repository_id in admin_repository_ids
+                ],
+            }
+            for s in summaries
+        ]
+    }
+
+
+@app.delete("/v1/admin/keys/{key_id}")
+def revoke_key(key_id: int, auth: AuthorizedKey = Depends(require_api_key)):
+    key_repository_ids = get_api_key_repository_ids(storage_manager, key_id)
+    if key_repository_ids is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    if key_repository_ids:
+        for repository_id in key_repository_ids:
+            auth.authorize_role(repository_id, "admin")
+    else:
+        _require_admin_somewhere(auth, "Revoking")
+
+    summary = revoke_api_key(storage_manager, key_id)
+    return {
+        "id": summary.id,
+        "revoked_at": summary.revoked_at.isoformat() if summary.revoked_at else None,
     }
