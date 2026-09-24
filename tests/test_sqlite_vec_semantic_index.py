@@ -259,16 +259,19 @@ def test_add_batch_empty_list_is_a_safe_no_op():
 
 def test_known_limitation_repeated_add_of_the_same_doc_id_accumulates_duplicates():
     """
-    Documents, deliberately and explicitly, a REAL, PRE-EXISTING
-    characteristic this milestone does NOT change: `VectorIndex` (both
-    before and after the Phase 2.2 sqlite-vec swap) has no doc_id-based
-    replace/upsert logic -- `add`/`add_batch` are pure-append operations.
-    Unlike Phase 2.1's `BM25Index.remove_repo`, no repository-replacement
-    idempotency was implemented for `VectorIndex` in this milestone (see
-    codepulse/search/vector.py's module docstring and
-    CODEPULSE_PROGRESS.md's Phase 2.2 section for the full disclosed
-    reasoning). This test exists so that fact can never silently change
-    (in either direction) without a test noticing -- mirroring this
+    Documents, deliberately and explicitly, a REAL characteristic that
+    remains true even after `VectorIndex.remove_repo` was added: `add`/
+    `add_batch` themselves are, and remain, pure-append operations with
+    no automatic dedup-on-add -- calling `add` twice with the same
+    `doc_id` WITHOUT an intervening `remove_docs`/`remove_repo` still
+    produces a duplicate. `remove_repo(repo_id)` now exists (mirroring
+    Phase 2.1's `BM25Index.remove_repo`) and `IndexingEngine.
+    index_directory()` calls it before repopulating on a full re-index --
+    see `test_remove_repo_then_readd_does_not_accumulate_duplicates`
+    below for that resolved scenario, and codepulse/search/vector.py's
+    module docstring / CODEPULSE_PROGRESS.md for the full history. This
+    test exists so the underlying `VectorIndex`-level characteristic can
+    never silently change without a test noticing -- mirroring this
     project's own established practice (e.g.
     test_restart_idempotency.py's explicit "does NOT survive restart"
     assertions) of asserting known characteristics explicitly rather than
@@ -363,6 +366,56 @@ def test_remove_docs_preserves_metadata_and_vectors_alignment_for_remaining_docs
     results = index.search(np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), top_k=1)
     assert results[0]["doc_id"] == "doc2"
     assert results[0]["metadata"] == {"n": 2}
+
+
+# =============================================================================
+# Backend-hardening fix -- VectorIndex.remove_repo(repo_id), closing the
+# "full re-index accumulates duplicate vectors forever" gap disclosed since
+# Phase 2.2 (see this module's own class docstring and CODEPULSE_PROGRESS.md).
+# Mirrors tests/test_tantivy_lexical_index.py's BM25Index.remove_repo tests.
+# =============================================================================
+
+def test_remove_repo_removes_exactly_that_repos_documents():
+    index = VectorIndex(dimension=4)
+    index.add("1::a.py::foo", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), {"repo_id": 1})
+    index.add("1::b.py::bar", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32), {"repo_id": 1})
+    index.add("2::a.py::foo", np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32), {"repo_id": 2})
+
+    index.remove_repo(1)
+
+    assert index.doc_ids == ["2::a.py::foo"]
+    assert index.metadata == [{"repo_id": 2}]
+    assert index.vectors.shape == (1, 4)
+
+
+def test_remove_repo_on_never_indexed_repo_is_a_safe_no_op():
+    index = VectorIndex(dimension=4)
+    index.add("1::a.py::foo", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32), {"repo_id": 1})
+
+    index.remove_repo(999)  # never indexed
+
+    assert index.doc_ids == ["1::a.py::foo"]
+    assert index.vectors.shape == (1, 4)
+
+
+def test_remove_repo_then_readd_does_not_accumulate_duplicates():
+    """The exact scenario this fix exists for: a full, non-incremental
+    re-index calls remove_repo(repo_id) before repopulating -- proving
+    that sequence no longer leaves duplicate entries behind, unlike the
+    disclosed pre-fix behavior `test_known_limitation_repeated_add_of_
+    the_same_doc_id_accumulates_duplicates` still documents for a caller
+    that skips remove_repo entirely."""
+    index = VectorIndex(dimension=4)
+    v = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    for _ in range(3):  # simulates 3 full re-indexes of the same repo
+        index.remove_repo(1)
+        index.add("1::a.py::foo", v, {"repo_id": 1})
+
+    assert index.doc_ids.count("1::a.py::foo") == 1
+    assert index.vectors.shape == (1, 4)
+    results = index.search(v, top_k=10)
+    assert sum(1 for r in results if r["doc_id"] == "1::a.py::foo") == 1
 
 
 # =============================================================================

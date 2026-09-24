@@ -181,6 +181,27 @@ def test_repeated_reindex_is_idempotent_and_identifiers_stay_stable(tmp_path, sh
             f"got {engine.bm25_index.num_docs}"
         )
 
+        # Backend-hardening fix (mirrors the bm25_index assertion just
+        # above): before this fix, VectorIndex had no repository-replacement
+        # call at all, so this exact 5-iteration full-reindex loop would
+        # have silently accumulated 5x duplicate vector entries -- asserted
+        # explicitly here, against the real IndexingEngine (not just the
+        # VectorIndex unit tests in test_sqlite_vec_semantic_index.py), so
+        # that regression can never again go unnoticed. Each symbol may
+        # legitimately produce more than one chunk (SemanticChunker), so
+        # this asserts non-growth across iterations rather than a fixed
+        # count of exactly 3.
+        if iteration == 0:
+            seen["vector_doc_count"] = len(engine.vector_index.doc_ids)
+            assert seen["vector_doc_count"] >= 3
+        else:
+            assert len(engine.vector_index.doc_ids) == seen["vector_doc_count"], (
+                f"iteration {iteration}: repeated re-indexing must not accumulate duplicate "
+                f"vector (sqlite-vec) documents -- expected exactly "
+                f"{seen['vector_doc_count']} (stable since iteration 0), "
+                f"got {len(engine.vector_index.doc_ids)}"
+            )
+
 
 # --- 2. Restart restores durable (semantic) state, not in-memory-only state -
 

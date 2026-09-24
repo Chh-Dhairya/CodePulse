@@ -14,6 +14,7 @@ from sqlalchemy import (
     Float,
     UniqueConstraint,
     create_engine,
+    inspect,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, Session
 
@@ -418,6 +419,34 @@ class StorageManager:
         self.create_tables()
 
     def create_tables(self) -> None:
+        """
+        Creates every table declared on `Base.metadata` that doesn't yet
+        exist -- but ONLY on a database Alembic has never touched (no
+        `alembic_version` table present). Backend-hardening fix, closing
+        the actual root cause of three separate, real, documented
+        incidents (see CODEPULSE_PROGRESS.md's "Known technical debt"):
+        an ad-hoc `StorageManager()` construction against the REAL,
+        already-migrated `codepulse.db` (e.g. importing
+        `codepulse.api.app` without an isolated `CODEPULSE_DB_URL`)
+        could silently `create_all()` a table a pending Alembic
+        migration hadn't created yet, racing ahead of Alembic and
+        leaving `alembic_version` stale -- requiring manual
+        remediation each time it happened.
+
+        A fresh, disposable database (every test fixture in this
+        project's own suite, e.g. `tests/conftest.py`'s `isolated_app`)
+        has no `alembic_version` table yet, so this remains a true
+        zero-setup `create_all()` for that case, unchanged from before
+        this fix -- `tests/test_migrations.py::
+        test_existing_database_stamping_scenario_2` exercises exactly
+        this "no alembic_version yet" precondition directly. The real
+        `codepulse.db` has had an `alembic_version` table since its very
+        first migration; from that point on, this method is a safe
+        no-op for it, and schema changes must go through Alembic only.
+        """
+        inspector = inspect(self.engine)
+        if inspector.has_table("alembic_version"):
+            return
         Base.metadata.create_all(bind=self.engine)
 
     def get_session(self) -> Session:

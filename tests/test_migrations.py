@@ -269,6 +269,124 @@ def test_existing_database_stamping_scenario_2():
                 pass
 
 
+def test_storage_manager_never_races_ahead_of_a_pending_migration():
+    """
+    Backend-hardening fix -- direct regression test for the exact
+    incident class documented in CODEPULSE_PROGRESS.md's "Known
+    technical debt" (three real, separate occurrences): an ad-hoc
+    `StorageManager()` construction against an already-Alembic-managed
+    database used to silently `create_all()` a table a pending
+    migration hadn't created yet, racing ahead of Alembic.
+
+    Reproduces the exact shape of the incident: migrate only partway
+    (to `de22df2fc3ce`, the revision immediately BEFORE
+    `c286d277ea21` added `repository_snapshots`), so the database has
+    a real `alembic_version` table but is deliberately missing a table
+    that exists on `Base.metadata`. Before this fix, constructing
+    `StorageManager` against this database would have silently created
+    `repository_snapshots` anyway (via `create_all()`), leaving Alembic
+    unaware that table now exists outside its own migration history --
+    exactly what happened for real with `index_jobs` (Phase 1.3),
+    `repository_snapshots` (Phase 3.1), and `call_edges` (Phase 3.4).
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+    storage = None
+
+    try:
+        run_migrations(db_url=db_url, revision="de22df2fc3ce")
+
+        engine = create_engine(db_url)
+        insp = inspect(engine)
+        before_tables = set(insp.get_table_names())
+        assert "alembic_version" in before_tables
+        assert "repository_snapshots" not in before_tables, (
+            "test setup assumption violated -- de22df2fc3ce must predate "
+            "the repository_snapshots table for this regression test to "
+            "actually exercise the incident scenario"
+        )
+
+        # THE FIX UNDER TEST: constructing StorageManager against this
+        # partially-migrated database must NOT create the missing table.
+        storage = StorageManager(db_url=db_url)
+
+        insp_after = inspect(engine)
+        after_tables = set(insp_after.get_table_names())
+        assert "repository_snapshots" not in after_tables, (
+            "StorageManager() must never create_all() a table on an "
+            "already-Alembic-managed database (alembic_version present) "
+            "-- doing so races ahead of a pending migration, the exact "
+            "root cause of three real, documented incidents"
+        )
+        assert get_current_revision(db_url) == "de22df2fc3ce", (
+            "alembic_version must stay exactly where the last real "
+            "migration left it -- StorageManager must never touch it"
+        )
+
+        # The database remains fully usable for every table THAT DOES
+        # already exist -- this fix only prevents creating NEW tables
+        # outside Alembic, it doesn't break normal operation.
+        session = storage.get_session()
+        try:
+            repo = RepositoryModel(name="partial_repo", url="https://example.com/partial")
+            session.add(repo)
+            session.commit()
+            assert session.query(RepositoryModel).filter_by(name="partial_repo").first() is not None
+        finally:
+            session.close()
+
+    finally:
+        if storage is not None and hasattr(storage, "engine"):
+            storage.engine.dispose()
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_storage_manager_still_creates_tables_on_a_genuinely_fresh_database():
+    """
+    The other half of the same fix: a database Alembic has never touched
+    at all (no `alembic_version` table -- the exact shape of every test
+    fixture in this project's own suite, e.g. `tests/conftest.py`'s
+    `isolated_app`) must still get a full, zero-setup schema from
+    `StorageManager`'s `create_all()`, unchanged from before this fix.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    storage = None
+    try:
+        storage = StorageManager(db_url=db_url)
+        insp = inspect(storage.engine)
+        table_names = set(insp.get_table_names())
+        assert "alembic_version" not in table_names, (
+            "a fresh StorageManager-created database is NOT Alembic-managed "
+            "-- it has real tables but no migration history, by design "
+            "(this is the pre-existing, unchanged 'disposable test DB' path)"
+        )
+        assert {"repositories", "files", "symbols", "call_edges"}.issubset(table_names)
+    finally:
+        if storage is not None and hasattr(storage, "engine"):
+            storage.engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
 def test_phase_0_3_migration_preserves_data_and_adds_content_hash():
     """
     SCENARIO 3 (Phase 0.3) — Upgrading a pre-Phase-0.3 database:

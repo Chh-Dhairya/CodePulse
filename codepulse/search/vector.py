@@ -69,29 +69,36 @@ class VectorIndex:
     CLAUDE.md §4), which an approximate structure would not guarantee as
     simply.
 
-    Known limitation, UPDATED by Phase 3.1, not fully resolved by it
-    (disclosed, not silently expanded scope -- see CODEPULSE_PROGRESS.md):
-    Phase 2.2 shipped with `add`/`add_batch` as pure-append operations
-    and no delete capability at all, unlike Phase 2.1's
-    `BM25Index.remove_repo` -- meaning re-indexing an already-indexed
-    repository silently accumulated duplicate vector entries. Phase 3.1
-    adds a real, general `remove_docs(doc_ids)` method (needed for its
-    own literal "(deleted)" file-handling requirement), which
-    `IndexingEngine.index_directory()`'s new incremental path now also
-    uses to remove the OLD embeddings of a file whose content changed
-    before re-adding the new ones -- closing the practical duplication
-    gap for that specific, incremental-reindex case. It does **not**
-    add a `remove_repo`-style "delete everything for this repo_id in
-    one call" convenience, and a caller who adds the exact same
-    `doc_id` twice WITHOUT first calling `remove_docs` still gets a
-    duplicate (no automatic dedup-on-add exists, by design -- see
-    `remove_docs`'s own docstring). A **full**, non-incremental re-index
-    of an already-indexed repository (the same scenario Phase 2.1's
-    `remove_repo` handles for the lexical index) still accumulates
-    vector duplicates exactly as before -- this specific gap remains
-    open, tracked in `CODEPULSE_PROGRESS.md`, not addressed by this
-    milestone (Phase 3.1's own scope is git-diff-driven incremental
-    indexing specifically, not full-reindex idempotency for `VectorIndex`).
+    Known limitation, UPDATED by Phase 3.1, then RESOLVED (for the
+    full-reindex case specifically) by a later backend-hardening pass --
+    kept here for history rather than silently rewritten (disclosed, not
+    silently expanded scope -- see CODEPULSE_PROGRESS.md): Phase 2.2
+    shipped with `add`/`add_batch` as pure-append operations and no
+    delete capability at all, unlike Phase 2.1's `BM25Index.remove_repo`
+    -- meaning re-indexing an already-indexed repository silently
+    accumulated duplicate vector entries. Phase 3.1 added a real, general
+    `remove_docs(doc_ids)` method (needed for its own literal "(deleted)"
+    file-handling requirement), which `IndexingEngine.index_directory()`'s
+    incremental path uses to remove the OLD embeddings of a file whose
+    content changed before re-adding the new ones -- closing the
+    practical duplication gap for that specific, incremental-reindex
+    case. It deliberately did **not** add a `remove_repo`-style "delete
+    everything for this repo_id in one call" convenience at that time.
+
+    `add`/`add_batch` themselves remain pure-append, by design, with no
+    automatic dedup-on-add -- a caller who adds the exact same `doc_id`
+    twice WITHOUT first calling `remove_docs`/`remove_repo` still gets a
+    duplicate (see `remove_docs`'s own docstring, and
+    `test_known_limitation_repeated_add_of_the_same_doc_id_accumulates_
+    duplicates` in `tests/test_sqlite_vec_semantic_index.py`, which keeps
+    asserting exactly this at the `VectorIndex` level). **RESOLVED at the
+    `IndexingEngine` level**: `remove_repo(repo_id)` (below) now exists,
+    mirroring `BM25Index.remove_repo`'s exact semantics, and
+    `IndexingEngine.index_directory()` calls it before repopulating the
+    vector index on a FULL (non-incremental) re-index -- the same
+    replace-not-accumulate treatment Phase 2.1 already gave the lexical
+    index. A full re-index of an already-indexed repository therefore no
+    longer accumulates vector duplicates.
 
     Thread-safety note (a necessary, disclosed adjustment, not a design
     preference): the underlying `sqlite3.Connection` is constructed with
@@ -186,6 +193,30 @@ class VectorIndex:
 
         self.doc_ids.extend(doc_ids)
         self.metadata.extend(resolved_metas)
+
+    def remove_repo(self, repo_id: int) -> None:
+        """
+        Deletes every currently-indexed vector document belonging to
+        `repo_id`, mirroring `BM25Index.remove_repo`'s existing
+        repository-replacement semantics exactly (see
+        `IndexingEngine.index_directory()`'s call site, right before the
+        vector index is repopulated on a full re-index). Closes the gap
+        this class's own docstring has disclosed since Phase 2.2: `add`/
+        `add_batch` are pure-append with no dedup-on-add, and until now
+        there was no bulk "delete everything for this repo_id" operation
+        the way `BM25Index` has always had -- so a full, non-incremental
+        re-index of an already-indexed repository silently accumulated
+        duplicate vector entries forever. Identifies matching documents
+        via `self.metadata`'s `repo_id` field (populated by every caller
+        that adds vectors -- `IndexingEngine`'s indexing and hydration
+        paths both set it), then delegates to `remove_docs` for the
+        actual deletion bookkeeping (rowid mapping, `.vectors` array
+        alignment). Safe to call for a `repo_id` with no existing
+        documents -- a no-op, matching `remove_docs`'s own
+        no-op-safety precedent.
+        """
+        doc_ids = [d for d, m in zip(self.doc_ids, self.metadata) if m.get("repo_id") == repo_id]
+        self.remove_docs(doc_ids)
 
     def remove_docs(self, doc_ids: list[str]) -> None:
         """

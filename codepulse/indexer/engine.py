@@ -994,6 +994,23 @@ class IndexingEngine:
         # no embedding is generated, persisted, or added to the vector index
         # for this run, and the failure is reported in the returned stats
         # rather than silently reported as success.
+        #
+        # Backend-hardening fix: mirrors the exact same "wipe this repo's
+        # entries before a full re-index" treatment `bm25_index.remove_repo`
+        # already receives below (step 5) -- see that call's own comment for
+        # why this is only correct for a FULL run (an incremental run's
+        # `_purge_stale_entries`/`remove_docs` calls already remove exactly
+        # the stale entries, and a whole-repo wipe here would discard every
+        # unchanged file's embeddings with nothing in this run to re-add
+        # them). Closes a real, previously-disclosed gap: unlike
+        # `BM25Index`, `VectorIndex` had no repository-replacement call at
+        # all until now, so a full re-index of an already-indexed
+        # repository silently accumulated duplicate vector entries forever
+        # (see `VectorIndex.remove_repo`'s own docstring and
+        # CODEPULSE_PROGRESS.md for the full history).
+        if not incremental_plan.is_incremental:
+            self.vector_index.remove_repo(repo_id)
+
         chunk_embeddings: list[tuple[Symbol, CodeChunk, np.ndarray]] = []
         embedding_error: str | None = None
 
