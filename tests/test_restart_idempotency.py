@@ -17,10 +17,13 @@ This file adds exactly the gaps that audit found:
      than two re-indexing passes (the existing tests prove each entity
      type in isolation, mostly across exactly two indexing calls).
   2. An explicit test of what a "restart" actually restores: semantic
-     search (durable, hydrated) vs. lexical/call-graph state (not
-     durable -- no backing DB table for either). No existing test asserts
-     the *absence* of lexical/graph state after a restart; only the
-     *presence* of hydrated vector state was previously tested.
+     search (durable, hydrated) vs. call-graph state (not durable -- no
+     backing DB table for it). Originally, this test also asserted
+     lexical (BM25) state was NOT durable -- a later backend-hardening
+     addition (not a roadmap sprint item) made `hydrate_repository` ALSO
+     rebuild `bm25_index` from durably persisted `symbols`/`files` rows,
+     so this test now asserts lexical state IS restored too; only the
+     call graph and the in-memory symbol map remain genuinely non-durable.
   3. A test proving hydration itself never calls the embedding model
      (spied, not merely "doesn't crash" -- hydrate_all()'s own try/except
      would silently swallow a real call failure, so "no crash" alone
@@ -203,9 +206,21 @@ def test_repeated_reindex_is_idempotent_and_identifiers_stay_stable(tmp_path, sh
             )
 
 
-# --- 2. Restart restores durable (semantic) state, not in-memory-only state -
+# --- 2. Restart restores durable (semantic + lexical) state, not the call graph
 
-def test_restart_restores_semantic_state_but_not_lexical_or_graph_state(tmp_path, shared_embedder):
+def test_restart_restores_semantic_and_lexical_state_but_not_the_call_graph(tmp_path, shared_embedder):
+    """
+    Backend-hardening addition (not a roadmap sprint item) changed this
+    test's own expected behavior, deliberately: `bm25_index` used to be
+    entirely non-durable (asserted `== 0`/`keyword_results == []` after
+    restart) -- `hydrate_repository` now ALSO rebuilds it from durably
+    persisted `symbols`/`files` rows (no re-parse, no re-embed), closing
+    that real, previously-disclosed gap. The call graph and
+    `symbols_by_id` remain genuinely NOT durable -- rebuilding either
+    needs the full parse-result/import-resolution machinery
+    `index_directory()` owns, unchanged by this addition -- so those
+    assertions are unchanged from before.
+    """
     repo_path = _make_repo_dir(
         tmp_path,
         "repo_restart",
@@ -231,18 +246,24 @@ def test_restart_restores_semantic_state_but_not_lexical_or_graph_state(tmp_path
     assert len(semantic_results) >= 1
     assert any(r.symbol_name == "greet" for r in semantic_results)
 
-    # Lexical (BM25) and call-graph state are NOT durable -- there is no
-    # backing DB table for either, so a fresh engine starts genuinely
-    # empty until index_directory() is called again. This is the actual,
-    # intended architecture (Phase 0.5 only made embeddings durable), not
-    # a defect -- asserted explicitly here so it can never silently regress
-    # into a false "everything survives restart" claim.
-    assert engine2.bm25_index.num_docs == 0, "BM25 index has no backing table and must not survive restart"
+    # Lexical (BM25) search state IS ALSO durable, as of this addition --
+    # rehydrated from the symbols/files tables, not re-parsed.
+    assert engine2.bm25_index.num_docs == engine1.bm25_index.num_docs, (
+        "BM25 index must be rehydrated to the same document count after restart"
+    )
+    keyword_results = engine2.search("friendly greeting", limit=5, search_type="keyword")
+    assert len(keyword_results) >= 1, "keyword search must work immediately after restart, no re-index required"
+    assert any(r.symbol_name == "greet" for r in keyword_results)
+
+    # The call graph and the in-memory symbol map remain NOT durable --
+    # there is no backing DB table for either that a plain row-to-object
+    # rehydration can restore from; a fresh engine starts genuinely empty
+    # until index_directory() is called again. This is the actual,
+    # intended architecture, not a defect -- asserted explicitly here so
+    # it can never silently regress into a false "everything survives
+    # restart" claim.
     assert engine2.call_graphs == {}, "call graphs have no backing table and must not survive restart"
     assert engine2.symbols_by_id == {}, "in-memory symbol map has no backing table and must not survive restart"
-
-    keyword_results = engine2.search("anything", limit=5, search_type="keyword")
-    assert keyword_results == [], "keyword search must return nothing until re-indexed after restart"
 
 
 # --- 3. Hydration never calls the embedding model ---------------------------

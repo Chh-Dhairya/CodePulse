@@ -15,7 +15,7 @@ from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableErro
 from codepulse.git_diff import GitDiffError, detect_file_changes, get_head_commit_sha
 from codepulse.indexer.ignore import RepositoryIgnoreRules
 from codepulse.ingestion_safety import IngestionSafetyError
-from codepulse.models import FileParseResult, Symbol, compute_content_hash
+from codepulse.models import FileParseResult, Symbol, SymbolType, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
 from codepulse.parser.module_graph import ModuleGraphBuilder
@@ -1665,26 +1665,46 @@ class IndexingEngine:
         functional again purely from the database, no embedding-model call
         required.
 
-        Only semantic retrieval is restored this way. Keyword/hybrid search
-        and the call graph (`bm25_index`, `symbols_by_id`, `call_graph`) are
-        not durable and still require a fresh `index_directory()` call --
-        `BM25Index`/`CallGraphBuilder` have no backing DB table; persisting
-        them is out of Phase 0.5's scope (that's Phase 2/Phase 3 territory).
+        Backend-hardening addition (not a roadmap sprint item): this method
+        ALSO rebuilds `bm25_index` for this repository from durably
+        persisted `SymbolModel`/`FileModel` rows -- no re-parsing, no
+        re-embedding, just re-tokenizing already-stored symbol text. This
+        closes a real, previously-disclosed gap (`tests/
+        test_restart_idempotency.py`'s own "BM25 index has no backing
+        table and must not survive restart" assertion, since RELAXED to
+        match): before this, keyword/hybrid search returned nothing at
+        all until a fresh `index_directory()` call, even though every
+        symbol needed to rebuild it already existed durably in `symbols`/
+        `files`. `SymbolModel`/`FileModel` remain the actual source of
+        truth throughout -- `bm25_index` is still a derived, rebuildable
+        artifact (per `BM25Index`'s own class docstring), just rebuilt
+        from SQL at startup instead of only ever from a fresh parse. The
+        call graph (`symbols_by_id`, `call_graph`) remains NOT durable --
+        rebuilding it needs the full parse-result/import-resolution
+        machinery `index_directory()` owns, not a plain row-to-object
+        mapping the way symbols/embeddings are; still requires a fresh
+        `index_directory()` call, unchanged by this addition.
 
-        Repository scoping: only embeddings that belong to Symbols whose
-        File belongs to the given `repo_url` are loaded, so embeddings from
-        one repository can never be hydrated into another's results. Each
-        loaded vector's metadata is also tagged with `repo_id` (the same
-        `RepositoryModel.id` used everywhere else), which is what lets
-        `search(..., repository_id=...)` (Phase 0.6) filter hydrated
+        Repository scoping: only embeddings/symbols that belong to (or
+        whose File belongs to) the given `repo_url` are loaded, so data
+        from one repository can never be hydrated into another's results.
+        Each loaded vector's metadata is also tagged with `repo_id` (the
+        same `RepositoryModel.id` used everywhere else), which is what
+        lets `search(..., repository_id=...)` (Phase 0.6) filter hydrated
         embeddings correctly even though `hydrate_all()` loads every
-        repository into the same shared `vector_index`.
+        repository into the same shared `vector_index`/`bm25_index`.
 
-        Vector-dimension safety: a persisted row whose `embedding_dim`
-        doesn't match the currently configured `vector_index.dimension` is
-        skipped explicitly (e.g. the embedding model or dimension was
-        changed since that row was written) rather than being loaded and
-        silently corrupting similarity results.
+        Vector-dimension safety: a persisted embedding row whose
+        `embedding_dim` doesn't match the currently configured
+        `vector_index.dimension` is skipped explicitly (e.g. the
+        embedding model or dimension was changed since that row was
+        written) rather than being loaded and silently corrupting
+        similarity results. No equivalent skip exists for symbol
+        hydration -- there is no "wrong shape" failure mode for plain
+        text fields the way there is for a fixed-dimension vector; a row
+        whose `type` doesn't parse as a known `SymbolType` (a defensive,
+        not-currently-reachable case -- every parser only ever produces
+        valid `SymbolType` values) is skipped and logged instead.
         """
         session = self.storage.get_session()
         try:
@@ -1692,7 +1712,12 @@ class IndexingEngine:
                 session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
             )
             if repo_record is None:
-                return {"repo_id": None, "hydrated_embeddings": 0, "skipped_dimension_mismatch": 0}
+                return {
+                    "repo_id": None,
+                    "hydrated_embeddings": 0,
+                    "skipped_dimension_mismatch": 0,
+                    "hydrated_symbols": 0,
+                }
 
             rows = (
                 session.query(EmbeddingModel, SymbolModel, FileModel)
@@ -1743,10 +1768,51 @@ class IndexingEngine:
             if vectors:
                 self.vector_index.add_batch(doc_ids, np.vstack(vectors), metadatas)
 
+            # Backend-hardening addition: rebuild the lexical index from
+            # every persisted symbol in this repository (not just ones
+            # with an embedding -- index_directory() adds every symbol to
+            # bm25_index regardless of embedding success, for degraded-mode
+            # keyword search; hydration matches that behavior exactly).
+            symbol_rows = (
+                session.query(SymbolModel, FileModel)
+                .join(FileModel, SymbolModel.file_id == FileModel.id)
+                .filter(FileModel.repo_id == repo_record.id)
+                .all()
+            )
+            hydrated_symbols = 0
+            for sm, fm in symbol_rows:
+                try:
+                    symbol_obj = Symbol(
+                        name=sm.name,
+                        type=SymbolType(sm.type),
+                        file_path=fm.path,
+                        start_line=sm.start_line,
+                        end_line=sm.end_line,
+                        signature=sm.signature or "",
+                        docstring=sm.docstring,
+                        body=sm.body or "",
+                        language=sm.language,
+                    )
+                except ValueError as e:
+                    logger.warning(
+                        "Skipping unreadable symbol row id=%s during lexical hydration: %s", sm.id, e
+                    )
+                    continue
+                # Matches index_directory's own doc_id format exactly
+                # (repo_id::file_path::name) -- required so a subsequent
+                # index_directory() call's remove_repo/add_symbol pair
+                # replaces this hydrated entry rather than duplicating it.
+                doc_id = f"{repo_record.id}::{fm.path}::{sm.name}"
+                self.bm25_index.add_symbol(doc_id, symbol_obj, repo_id=repo_record.id)
+                hydrated_symbols += 1
+            if hydrated_symbols:
+                self.bm25_index.build()
+
             return {
                 "repo_id": repo_record.id,
                 "hydrated_embeddings": len(doc_ids),
                 "skipped_dimension_mismatch": skipped_dimension_mismatch,
+                "hydrated_symbols": hydrated_symbols,
             }
         finally:
             session.close()
@@ -1755,9 +1821,11 @@ class IndexingEngine:
         """
         Phase 0.5 -- load-on-startup hydration for every repository in the
         database. Called automatically once from `__init__` so a freshly
-        constructed engine (e.g. a new server process) has semantic search
-        available immediately from durable storage, without re-indexing.
-        See `hydrate_repository` for the per-repository details.
+        constructed engine (e.g. a new server process) has semantic AND
+        (backend-hardening addition, not a roadmap sprint item) keyword
+        search available immediately from durable storage, without
+        re-indexing. See `hydrate_repository` for the per-repository
+        details.
         """
         session = self.storage.get_session()
         try:
@@ -1767,15 +1835,18 @@ class IndexingEngine:
 
         total_hydrated = 0
         total_skipped = 0
+        total_symbols = 0
         for url in repo_urls:
             result = self.hydrate_repository(url)
             total_hydrated += result["hydrated_embeddings"]
             total_skipped += result["skipped_dimension_mismatch"]
+            total_symbols += result["hydrated_symbols"]
 
-        if total_hydrated or total_skipped:
+        if total_hydrated or total_skipped or total_symbols:
             logger.info(
-                "Startup hydration: %d embeddings loaded across %d repositories (%d skipped: dimension mismatch)",
+                "Startup hydration: %d embeddings + %d lexical symbols loaded across %d repositories (%d skipped: dimension mismatch)",
                 total_hydrated,
+                total_symbols,
                 len(repo_urls),
                 total_skipped,
             )
@@ -1784,6 +1855,7 @@ class IndexingEngine:
             "repositories": len(repo_urls),
             "hydrated_embeddings": total_hydrated,
             "skipped_dimension_mismatch": total_skipped,
+            "hydrated_symbols": total_symbols,
         }
 
     def search(

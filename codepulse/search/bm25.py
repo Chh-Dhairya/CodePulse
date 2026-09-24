@@ -121,10 +121,21 @@ class BM25Index:
     implementation. The index lives entirely in memory
     (`tantivy.Index(schema)` with no path argument -- verified
     experimentally that this constructs an in-RAM index) and is NOT
-    persisted to disk in this milestone; it does not survive process
-    restart, matching the existing, explicitly-tested contract in
-    `tests/test_restart_idempotency.py` ("BM25 index has no backing table
-    and must not survive restart").
+    persisted to disk directly -- there are no on-disk Tantivy index
+    segments anywhere. It does NOT survive a process restart on its own.
+
+    Backend-hardening addition (not a roadmap sprint item):
+    `IndexingEngine.hydrate_repository`/`hydrate_all` now rebuild this
+    index at engine-construction time from the durable `SymbolModel`/
+    `FileModel` rows above (re-tokenizing already-stored text, no
+    re-parsing, no embedding-model call) -- so a fresh `IndexingEngine`
+    has working keyword search immediately, without requiring a new
+    `index_directory()` call first. This is still a from-scratch,
+    in-memory REBUILD on every process start (not literal on-disk index
+    persistence, which was evaluated and deliberately not pursued --
+    see CODEPULSE_PROGRESS.md's own entry for the reasoning), just one
+    that now happens automatically at startup as well as at indexing
+    time.
     """
 
     def __init__(self, k1: float | None = None, b: float | None = None) -> None:

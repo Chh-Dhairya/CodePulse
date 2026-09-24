@@ -156,6 +156,105 @@ def test_semantic_search_works_after_hydration_without_reindexing(tmp_path, shar
     assert any(r.symbol_name == "greet" for r in results)
 
 
+# --- Backend-hardening addition: lexical (BM25) hydration, not a roadmap ----
+# --- sprint item -- mirrors the two vector-hydration tests above exactly, --
+# --- proving `hydrate_repository`/`hydrate_all` now ALSO rebuild the -------
+# --- lexical index from durable symbols/files rows, closing the gap -------
+# --- test_restart_idempotency.py used to assert as permanent. -------------
+
+def test_lexical_hydration_after_fresh_engine_populates_bm25_index(tmp_path, shared_embedder):
+    db_path = tmp_path / "t2b.db"
+    db_url = f"sqlite:///{str(db_path).replace(os.sep, '/')}"
+    repo_path = _make_repo_dir(tmp_path, "repo_b_lex", SAMPLE_FILES)
+
+    engine1 = _new_engine(db_url, shared_embedder)
+    engine1.index_directory(repo_path, repo_name="repo_b_lex", repo_url=repo_path)
+    symbol_count = engine1.bm25_index.num_docs
+    assert symbol_count >= 1
+
+    # Simulate a process restart: a brand-new IndexingEngine, same database,
+    # no call to index_directory() -- hydration happens automatically in
+    # __init__.
+    engine2 = _new_engine(db_url, shared_embedder)
+
+    assert engine2.bm25_index.num_docs == symbol_count, (
+        "lexical hydration must populate bm25_index from durable symbols/files rows alone"
+    )
+
+
+def test_keyword_search_works_after_hydration_without_reindexing(tmp_path, shared_embedder):
+    db_path = tmp_path / "t3b.db"
+    db_url = f"sqlite:///{str(db_path).replace(os.sep, '/')}"
+    repo_path = _make_repo_dir(tmp_path, "repo_c_lex", SAMPLE_FILES)
+
+    engine1 = _new_engine(db_url, shared_embedder)
+    engine1.index_directory(repo_path, repo_name="repo_c_lex", repo_url=repo_path)
+
+    # Fresh engine: hydrated from DB only, index_directory() is never called.
+    engine2 = _new_engine(db_url, shared_embedder)
+    results = engine2.search("friendly greeting", limit=5, search_type="keyword")
+
+    assert len(results) >= 1, "keyword search must return results after hydration alone"
+    assert any(r.symbol_name == "greet" for r in results)
+
+
+def test_lexical_hydration_does_not_leak_across_repositories(tmp_path, shared_embedder):
+    db_path = tmp_path / "t2c.db"
+    db_url = f"sqlite:///{str(db_path).replace(os.sep, '/')}"
+    repo_a_path = _make_repo_dir(
+        tmp_path, "repo_lex_a",
+        {"main.py": 'def process_data(x):\n    """Process incoming data records for REPO_A specifically."""\n    return x + 1\n'},
+    )
+    repo_b_path = _make_repo_dir(
+        tmp_path, "repo_lex_b",
+        {"main.py": 'def process_data(x):\n    """Process incoming data records for REPO_B specifically."""\n    return x - 1\n'},
+    )
+
+    engine1 = _new_engine(db_url, shared_embedder)
+    result_a = engine1.index_directory(repo_a_path, repo_name="repo_lex_a", repo_url=repo_a_path)
+    result_b = engine1.index_directory(repo_b_path, repo_name="repo_lex_b", repo_url=repo_b_path)
+
+    engine2 = _new_engine(db_url, shared_embedder)
+    results_a = engine2.search(
+        "process incoming data records", limit=10, search_type="keyword", repository_id=result_a["repository_id"]
+    )
+    assert len(results_a) >= 1
+    assert all("REPO_A" in (r.docstring or "") for r in results_a), (
+        "hydrated lexical search scoped to repo A must never surface repo B's own docstring text"
+    )
+
+
+def test_hydrate_repository_reports_hydrated_symbol_count(tmp_path, shared_embedder):
+    """
+    `hydrate_repository`'s own return value reports exactly how many
+    symbols it rehydrated into `bm25_index`. Exercised directly on
+    `engine1` (rather than via a second engine's automatic `__init__`
+    hydration) after clearing its own just-added in-memory lexical
+    entries via `remove_repo` first -- this isolates the method's own
+    behavior without calling it twice on the same engine, which is NOT
+    a supported/idempotent usage (neither `bm25_index.add_symbol` nor
+    `vector_index.add_batch` dedup against an existing entry; this
+    method is only ever called once, from `__init__`, in production).
+    """
+    db_path = tmp_path / "t2d.db"
+    db_url = f"sqlite:///{str(db_path).replace(os.sep, '/')}"
+    repo_path = _make_repo_dir(tmp_path, "repo_hydrate_count", SAMPLE_FILES)
+
+    engine1 = _new_engine(db_url, shared_embedder)
+    result = engine1.index_directory(repo_path, repo_name="repo_hydrate_count", repo_url=repo_path)
+    symbol_count = engine1.bm25_index.num_docs
+    assert symbol_count >= 1
+
+    engine1.bm25_index.remove_repo(result["repository_id"])
+    engine1.bm25_index.build()
+    assert engine1.bm25_index.num_docs == 0
+
+    hydration_result = engine1.hydrate_repository(repo_path)
+    assert hydration_result["hydrated_symbols"] == symbol_count
+    assert hydration_result["repo_id"] == result["repository_id"]
+    assert engine1.bm25_index.num_docs == symbol_count
+
+
 # --- 5. Re-indexing unchanged content: no duplicate embedding rows ---------
 
 def test_reindexing_unchanged_content_reuses_embedding_row(tmp_path, shared_embedder):

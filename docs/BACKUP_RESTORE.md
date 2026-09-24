@@ -10,24 +10,31 @@ wins.
 CodePulse's default deployment (§25 Local Deployment Strategy) stores
 everything durable in one SQLite file (`codepulse.db` by default,
 `db_url` in `codepulse.toml`/`CODEPULSE_DB_URL`) plus the embedded
-lexical/vector index segments. **As of this writing, the lexical
-(`BM25Index`) and vector (`VectorIndex`) indexes are in-memory only and
-do not persist to disk between restarts** (a disclosed, existing
-limitation since Phase 0.10/2.1/2.2 -- see `CODEPULSE_PROGRESS.md`'s
-own "Known Issues"). This means:
+lexical/vector index segments. **The lexical (`BM25Index`) and vector
+(`VectorIndex`) indexes themselves are in-memory only and have no
+on-disk index-segment persistence of their own** (a disclosed,
+existing limitation since Phase 0.10/2.1/2.2 -- see
+`CODEPULSE_PROGRESS.md`'s own "Known Issues") -- but both are
+automatically and fully REBUILT from `codepulse.db` at engine
+startup, from data that already lives durably in `codepulse.db` itself
+(vectors were already covered this way since Phase 0.5; a later
+backend-hardening addition, not a roadmap sprint item, extended the
+same automatic rehydration to the lexical index). This means:
 
 - **What a backup actually protects today**: `codepulse.db` --
-  repositories, files, symbols, call/inheritance edges, durable
-  embedding vectors (`code_embeddings`, Phase 0.5), API keys, jobs,
-  snapshots.
+  repositories, files, symbols (the source `bm25_index` is rebuilt
+  from), call/inheritance edges, durable embedding vectors
+  (`code_embeddings`, the source `vector_index` is rebuilt from,
+  Phase 0.5), API keys, jobs, snapshots.
 - **What restoring does NOT need to separately recover**: the
-  in-memory lexical/vector index segments -- these are already
-  rebuilt automatically from `code_embeddings`/the DB on the next
-  `index_directory()` call (`IndexingEngine.hydrate_all`/
-  `hydrate_repository`, Phase 0.5), the same way they are after any
-  ordinary process restart. A restore is therefore operationally
-  identical to a restart: start the process against the restored
-  `codepulse.db`, and durable state rehydrates itself.
+  in-memory lexical/vector index segments -- both are rebuilt
+  automatically from `codepulse.db` the moment a fresh `IndexingEngine`
+  is constructed (`IndexingEngine.hydrate_all`/`hydrate_repository`,
+  called from `__init__`), with NO separate `index_directory()` call
+  required and no re-parsing or embedding-model call involved. A
+  restore is therefore operationally identical to a restart: start the
+  process against the restored `codepulse.db`, and durable state
+  rehydrates itself immediately.
 
 ### Backup procedure (verified against this project's own real database)
 
@@ -56,10 +63,10 @@ beyond CodePulse itself.
 # 2. Replace (or point CODEPULSE_DB_URL / codepulse.toml's db_url at)
 #    the backup file.
 cp "backups/codepulse-20260101T000000.db" codepulse.db
-# 3. Start CodePulse again. IndexingEngine.hydrate_all() rebuilds the
-#    in-memory lexical/vector indexes from the restored DB automatically
-#    -- no separate re-index is required for data that was already
-#    durably indexed before the backup was taken.
+# 3. Start CodePulse again. IndexingEngine.hydrate_all() rebuilds BOTH
+#    the in-memory lexical and vector indexes from the restored DB
+#    automatically -- no separate re-index is required for data that
+#    was already durably indexed before the backup was taken.
 ```
 
 **Verification performed for this document** (not merely asserted): a
@@ -82,9 +89,17 @@ synthetic example.
   use a proper SQLite online-backup API, not implemented here) rather
   than copying a live, actively-written file.
 - **The in-memory lexical/vector index segments' own on-disk
-  persistence** -- there is none yet (a separate, already-disclosed,
-  unrelated roadmap item; see §7/§26's own "on-disk index-segment
-  persistence" language, not built by any milestone so far).
+  persistence** -- there is still none, literally (no Tantivy index
+  segment files, no file-backed sqlite-vec table; see §7/§26's own
+  "on-disk index-segment persistence" language, not built by any
+  milestone so far). What changed is that the PRACTICAL consequence of
+  that gap -- keyword search returning nothing until a fresh
+  `index_directory()` call after a restart -- is now closed by a
+  different mechanism instead: automatic rehydration from
+  `codepulse.db`'s own durable `symbols`/`files` tables at every
+  engine startup (see above). A restore/restart therefore does NOT
+  require re-indexing to regain full search functionality, even though
+  no literal index-segment file exists on disk.
 
 ## Team/server mode (Postgres + Docker) -- documented, NOT independently verified
 
