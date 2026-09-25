@@ -273,3 +273,55 @@ def test_resolve_requires_authentication(nested_symbol_repo):
         f"/v1/repositories/{nested_symbol_repo['repo_id']}/resolve?path=main.py&line=1"
     )
     assert response.status_code == 401
+
+
+# --- GET /v1/repositories/{repo_id}/file-symbols --------------------------
+# Added alongside the VS Code extension's Phase 2 CodeLens provider: it
+# needs every symbol in an open file (to place a lens above each one),
+# not just the one at a specific line, and only knows the file's
+# workspace-relative path -- not any internal file_id.
+
+def test_file_symbols_lists_every_symbol_in_the_file_ordered_by_start_line(nested_symbol_repo):
+    d = nested_symbol_repo
+    response = d["client"].get(
+        f"/v1/repositories/{d['repo_id']}/file-symbols?path=main.py", headers=d["headers"]
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["repository_id"] == d["repo_id"]
+    assert body["file"] == "main.py"
+    names = [s["name"] for s in body["symbols"]]
+    assert names == ["Greeter", "greet"], "class must precede its own method (ordered by start_line)"
+
+    greeter = body["symbols"][0]
+    assert greeter["line_start"] == d["cls_range"][0]
+    assert greeter["line_end"] == d["cls_range"][1]
+    assert "symbol_id" in greeter and "type" in greeter and "complexity" in greeter
+
+
+def test_file_symbols_returns_404_for_an_unknown_file_path(nested_symbol_repo):
+    d = nested_symbol_repo
+    response = d["client"].get(
+        f"/v1/repositories/{d['repo_id']}/file-symbols?path=does_not_exist.py", headers=d["headers"]
+    )
+    assert response.status_code == 404
+
+
+def test_file_symbols_is_forbidden_for_a_repository_the_key_is_not_scoped_to(
+    tmp_path, shared_embedder, nested_symbol_repo
+):
+    engine = nested_symbol_repo["engine"]
+    _, other_result = _index_repo(tmp_path, "repo_file_symbols_other", shared_embedder, engine, SIMPLE_FILE)
+
+    response = nested_symbol_repo["client"].get(
+        f"/v1/repositories/{other_result['repository_id']}/file-symbols?path=main.py",
+        headers=nested_symbol_repo["headers"],
+    )
+    assert response.status_code == 403
+
+
+def test_file_symbols_requires_authentication(nested_symbol_repo):
+    response = nested_symbol_repo["client"].get(
+        f"/v1/repositories/{nested_symbol_repo['repo_id']}/file-symbols?path=main.py"
+    )
+    assert response.status_code == 401

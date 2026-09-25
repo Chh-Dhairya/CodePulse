@@ -1253,3 +1253,52 @@ def resolve_symbol_at_location(
         }
     finally:
         session.close()
+
+
+@app.get("/v1/repositories/{repo_id}/file-symbols")
+def list_symbols_for_file_path(
+    repo_id: int,
+    path: str = Query(..., min_length=1),
+    auth: AuthorizedKey = Depends(require_api_key),
+):
+    """
+    Lists every symbol declared in `path` (relative to the repository
+    root), ordered by `start_line`. Mirrors `GET /v1/files/{file_id}/symbols`
+    but keyed by `(repo_id, path)` like `resolve` above, so a client that
+    only knows a workspace-relative path (e.g. a CodeLens provider scanning
+    an open document) doesn't need a separate file_id lookup round-trip.
+    """
+    auth.authorize_repository(repo_id)
+    session = storage_manager.get_session()
+    try:
+        file_record = (
+            session.query(FileModel)
+            .filter(FileModel.repo_id == repo_id, FileModel.path == path)
+            .first()
+        )
+        if file_record is None:
+            raise HTTPException(status_code=404, detail=f"File not found in this repository: {path!r}")
+
+        symbols = (
+            session.query(SymbolModel)
+            .filter(SymbolModel.file_id == file_record.id)
+            .order_by(SymbolModel.start_line)
+            .all()
+        )
+        return {
+            "repository_id": repo_id,
+            "file": path,
+            "symbols": [
+                {
+                    "symbol_id": s.id,
+                    "name": s.name,
+                    "type": s.type,
+                    "line_start": s.start_line,
+                    "line_end": s.end_line,
+                    "complexity": s.complexity,
+                }
+                for s in symbols
+            ],
+        }
+    finally:
+        session.close()
