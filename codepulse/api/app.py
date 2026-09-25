@@ -14,6 +14,7 @@ from codepulse.api.errors import _record_api_error, error_json_response, install
 from codepulse.api.security import AuthorizedKey, require_api_key
 from codepulse.auth import create_api_key, get_api_key_repository_ids, list_api_keys_for_repositories, revoke_api_key
 from codepulse.config import get_settings
+from codepulse.embeddings.embedder import EmbeddingUnavailableError
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.ingestion_safety import IngestionSafetyError, validate_git_url, validate_local_path
 from codepulse.jobs import create_job, get_active_job, get_job, mark_failed, mark_running, mark_succeeded
@@ -244,12 +245,29 @@ def search(req: SearchRequest, auth: AuthorizedKey = Depends(require_api_key)):
     # AuthorizedKey.authorize_search_scope's docstring.
     auth.authorize_search_scope(req.repository_id)
     t0 = time.time()
-    results = indexing_engine.search(
-        req.query,
-        limit=req.limit,
-        search_type=req.search_type,
-        repository_id=req.repository_id,
-    )
+    # Backend-hardening addition (not a roadmap sprint item): "hybrid"/
+    # "rrf" already gracefully degrade to keyword-only results inside
+    # IndexingEngine.search() itself if the embedding model is
+    # unavailable (see that method's own docstring). Only a pure
+    # "semantic" request has no fallback and can still raise here --
+    # caught explicitly so it surfaces as a clear, honest 503 rather
+    # than the generic, opaque 500 an uncaught exception would produce.
+    try:
+        results = indexing_engine.search(
+            req.query,
+            limit=req.limit,
+            search_type=req.search_type,
+            repository_id=req.repository_id,
+        )
+    except EmbeddingUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"The embedding model is currently unavailable, so a "
+                f"search_type='{req.search_type}' request cannot be "
+                f"completed as asked: {e}. Try search_type='keyword' instead."
+            ),
+        )
     elapsed = time.time() - t0
     exec_time_ms = int(elapsed * 1000)
 

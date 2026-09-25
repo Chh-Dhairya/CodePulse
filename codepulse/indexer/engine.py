@@ -1902,12 +1902,48 @@ class IndexingEngine:
         When `repository_id` is None, behavior is byte-for-byte identical
         to pre-Phase-0.6 search: fully global/unscoped across every
         indexed/hydrated repository, exactly as before this milestone.
+
+        Backend-hardening addition (not a roadmap sprint item): query-side
+        embedding-failure degradation. `"hybrid"`/`"rrf"` gracefully fall
+        back to keyword-only results if the query-side `self.embedder.
+        encode(query)` call raises `EmbeddingUnavailableError` -- mirroring
+        `index_directory()`'s own established "proceed in lexical-only
+        degraded mode" philosophy for the exact same exception, just on
+        the read path instead of the write path. `fuse`/`fuse_rrf` both
+        already handle an empty `vector_results` list correctly (the same
+        code path a repository with zero embeddings already exercises),
+        so no new fusion logic was needed -- only the failure needed
+        catching. `"semantic"` (a request for vector-only results, with no
+        other candidate source to fall back to) deliberately still lets
+        the exception propagate uncaught -- returning an empty list would
+        misrepresent "the model is broken" as "nothing matched," which
+        this project's own "no fabricated/misleading success" discipline
+        does not allow; `POST /v1/search` catches it there instead and
+        returns a clear, honest 503 rather than an opaque 500 (see
+        `codepulse/api/app.py`).
         """
 
         def _repo_filter(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if repository_id is None:
                 return results
             return [r for r in results if r.get("metadata", {}).get("repo_id") == repository_id]
+
+        def _encode_query_or_degrade(query: str) -> np.ndarray | None:
+            """Returns the query embedding, or None if the embedding model
+            is unavailable -- the caller treats None as "no vector
+            candidates this call," never as an error to propagate. See
+            this method's own docstring for why only hybrid/rrf use this
+            (semantic has no fallback and must raise)."""
+            try:
+                return self.embedder.encode(query)
+            except EmbeddingUnavailableError as e:
+                logger.warning(
+                    "Query-side embedding unavailable, degrading to keyword-only results "
+                    "for this %s search: %s",
+                    search_type,
+                    e,
+                )
+                return None
 
         if search_type == "keyword":
             # Scoped: pull every candidate so filtering can't starve the
@@ -1940,8 +1976,8 @@ class IndexingEngine:
             vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit * 2
 
             bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
-            query_vec = self.embedder.encode(query)
-            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool))
+            query_vec = _encode_query_or_degrade(query)
+            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool)) if query_vec is not None else []
 
             return self.ranker.fuse_rrf(bm25_results=bm25_res, vector_results=vector_res, top_k=limit)
 
@@ -1950,8 +1986,8 @@ class IndexingEngine:
             vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit * 2
 
             bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
-            query_vec = self.embedder.encode(query)
-            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool))
+            query_vec = _encode_query_or_degrade(query)
+            vector_res = _repo_filter(self.vector_index.search(query_vec, top_k=vector_pool)) if query_vec is not None else []
 
             # Compute graph centrality / importance scores, scoped to the
             # requested repository's own call graph (self.call_graphs) so a
