@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Mapping
 
 from rich.console import Console
 from rich.panel import Panel
@@ -580,11 +581,34 @@ def cmd_doctor(args: argparse.Namespace) -> None:
     console.print(table)
 
 
+def resolve_mcp_api_key(cli_value: str | None, env: Mapping[str, str] | None = None) -> str | None:
+    """
+    Resolves the raw API key `--mcp` scopes its connection to, per §13.
+
+    `--api-key` takes priority when given. Otherwise falls back to the
+    `CODEPULSE_MCP_API_KEY` environment variable -- added specifically so
+    a process SPAWNING `codepulse serve --mcp` (the VS Code extension's
+    Phase 3 MCP integration; any other MCP client launcher) never has to
+    put a secret directly into that child process's command-line
+    arguments, which are visible to other processes on the same machine
+    (`ps`/Task Manager, `/proc/[pid]/cmdline`) -- a real, avoidable
+    exposure `--api-key`-only would otherwise force on every caller.
+    """
+    if cli_value:
+        return cli_value
+    return (os.environ if env is None else env).get("CODEPULSE_MCP_API_KEY") or None
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     """Starts the local REST API (default), or the MCP server over stdio with --mcp (§22: "start local API/MCP server")."""
     if args.mcp:
-        if not args.api_key:
-            console.print("[bold red]Error:[/bold red] --api-key is required for --mcp (MCP connections are scoped to repositories at connection-setup time, §13).")
+        api_key = resolve_mcp_api_key(args.api_key)
+        if not api_key:
+            console.print(
+                "[bold red]Error:[/bold red] --api-key (or the CODEPULSE_MCP_API_KEY environment "
+                "variable) is required for --mcp (MCP connections are scoped to repositories at "
+                "connection-setup time, §13)."
+            )
             sys.exit(1)
         import asyncio
         from codepulse.config import get_settings
@@ -595,7 +619,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         storage = StorageManager(db_url=settings.db_url)
         engine = IndexingEngine(storage=storage, embedder=_Embedder())
         try:
-            mcp = build_mcp_server(storage, engine, args.api_key)
+            mcp = build_mcp_server(storage, engine, api_key)
         except MCPAuthenticationError as e:
             console.print(f"[bold red]Error:[/bold red] {e}")
             sys.exit(1)
@@ -707,7 +731,16 @@ def main() -> None:
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
     serve_p.add_argument("--mcp", action="store_true", help="Start the MCP server (stdio transport) instead of the REST API")
-    serve_p.add_argument("--api-key", default=None, help="Raw API key to scope the MCP connection to (required with --mcp)")
+    serve_p.add_argument(
+        "--api-key",
+        default=None,
+        help=(
+            "Raw API key to scope the MCP connection to (required with --mcp, unless "
+            "CODEPULSE_MCP_API_KEY is set in the environment instead -- preferred for "
+            "spawned/managed processes, since CLI args are visible to other processes "
+            "on the same machine)"
+        ),
+    )
 
     args = parser.parse_args()
 

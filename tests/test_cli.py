@@ -28,6 +28,10 @@ wrapper over `build_mcp_server` (Phase 5.3's own `test_mcp_server.py`
 tests that function directly), and its REST branch is a thin wrapper
 over `uvicorn.run` -- disclosed as a known, deliberate test gap in
 CODEPULSE_PROGRESS.md's Phase 6.1 entry, not silently skipped.
+`resolve_mcp_api_key` (added later, for the VS Code extension's Phase 3)
+was extracted out of that untestable branch specifically because IT is
+a small pure function, and is covered in its own section near the
+bottom of this file.
 """
 from __future__ import annotations
 
@@ -267,3 +271,27 @@ def test_cli_commands_do_not_mix_up_two_repositories_sharing_the_same_database(t
     cli.cmd_status(argparse.Namespace(path=str(repo_a), json=True))
     status_a = _read_json(capsys)
     assert status_a["file_count"] == 1, "repo A's own status must reflect only its own one file"
+
+
+# --- resolve_mcp_api_key (extracted from cmd_serve's --mcp branch) ----------
+# Not a roadmap sprint item -- added for the VS Code extension's Phase 3
+# (MCP integration): a process SPAWNING `codepulse serve --mcp` should be
+# able to hand it the API key via an environment variable instead of a
+# CLI argument, since CLI args are visible to other processes on the
+# same machine. This one small pure function IS unit-testable, unlike
+# the rest of `cmd_serve --mcp` (see this module's own docstring above).
+
+def test_resolve_mcp_api_key_prefers_the_cli_value_when_both_are_given():
+    assert cli.resolve_mcp_api_key("cli-key", {"CODEPULSE_MCP_API_KEY": "env-key"}) == "cli-key"
+
+
+def test_resolve_mcp_api_key_falls_back_to_the_env_var():
+    assert cli.resolve_mcp_api_key(None, {"CODEPULSE_MCP_API_KEY": "env-key"}) == "env-key"
+
+
+def test_resolve_mcp_api_key_returns_none_when_neither_is_set():
+    assert cli.resolve_mcp_api_key(None, {}) is None
+
+
+def test_resolve_mcp_api_key_treats_an_empty_string_cli_value_as_unset():
+    assert cli.resolve_mcp_api_key("", {"CODEPULSE_MCP_API_KEY": "env-key"}) == "env-key"
