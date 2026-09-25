@@ -31,6 +31,11 @@ This file adds exactly the gaps that audit found:
   4. Repository isolation for semantic search specifically AFTER an
      explicit restart (existing coverage only tests isolation within one
      continuous engine session).
+  5. A later backend-hardening addition (not a roadmap sprint item): a
+     `running` IndexJob left behind by a "crashed" process must be
+     reaped (marked `failed`) the moment a fresh `IndexingEngine` is
+     constructed, so it never permanently blocks the advisory lock for
+     new indexing attempts against its repository.
 
 RESTART MODEL: every "restart" in this file means "dispose the first
 StorageManager's SQLAlchemy engine (closing its DB connection pool), then
@@ -354,3 +359,46 @@ def test_repository_isolation_holds_after_restart(tmp_path, shared_embedder):
         assert r.doc_id.startswith(f"{repo_b_id}::"), f"result {r.doc_id} must belong to repo B"
     assert all("REPO_A" not in r.snippet for r in results_b)
     assert any("REPO_B" in r.snippet for r in results_b)
+
+
+# --- 5. Stale IndexJob reaping (backend-hardening addition, not a roadmap ---
+# --- sprint item) -- end-to-end proof through the real IndexingEngine.__init__
+# --- entry point, mirroring hydration's own restart-model conventions here. -
+
+def test_stale_index_job_is_reaped_on_fresh_engine_construction(tmp_path, shared_embedder):
+    """
+    A `running` IndexJob left behind by a "crashed" process (simulated
+    here the same way every other test in this file simulates a
+    restart -- Restart Model B, a brand-new engine against the same
+    on-disk database) must be reclaimed the moment a fresh
+    `IndexingEngine` is constructed, so it never permanently blocks
+    `get_active_job`'s advisory lock for its repository. Unit-level
+    coverage of `reap_stale_jobs` itself (every status, every edge
+    case) lives in `tests/test_index_jobs.py`; this test proves only
+    that `IndexingEngine.__init__` genuinely wires it in.
+    """
+    from codepulse.jobs import create_job, get_active_job, get_job, mark_running
+
+    repo_path = _make_repo_dir(
+        tmp_path, "repo_reap",
+        {"main.py": 'def greet(name):\n    """Return a friendly greeting."""\n    return name\n'},
+    )
+    db_path = tmp_path / "reap.db"
+    db_url = f"sqlite:///{str(db_path).replace(os.sep, '/')}"
+
+    engine1 = _new_engine(db_url, shared_embedder)
+    result = engine1.index_directory(repo_path, repo_name="repo_reap", repo_url=repo_path)
+    repo_id = result["repository_id"]
+
+    stuck_job = create_job(engine1.storage, repo_id)
+    mark_running(engine1.storage, stuck_job.id)
+    assert get_active_job(engine1.storage, repo_id) is not None, "sanity: the job IS currently active"
+
+    engine2 = _restart(engine1, db_url, shared_embedder)
+
+    reloaded = get_job(engine2.storage, stuck_job.id)
+    assert reloaded.status == "failed"
+    assert "Reaped at startup" in reloaded.error_message
+    assert get_active_job(engine2.storage, repo_id) is None, (
+        "the reaped job must no longer block the advisory lock for a fresh indexing attempt"
+    )

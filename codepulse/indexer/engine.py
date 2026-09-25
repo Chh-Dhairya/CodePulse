@@ -15,6 +15,7 @@ from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableErro
 from codepulse.git_diff import GitDiffError, detect_file_changes, get_head_commit_sha
 from codepulse.indexer.ignore import RepositoryIgnoreRules
 from codepulse.ingestion_safety import IngestionSafetyError
+from codepulse.jobs import reap_stale_jobs
 from codepulse.models import FileParseResult, Symbol, SymbolType, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
@@ -154,6 +155,20 @@ class IndexingEngine:
             self.hydrate_all()
         except Exception as e:
             logger.warning("Startup embedding hydration failed (continuing without it): %s", e)
+
+        # Backend-hardening addition (not a roadmap sprint item): reclaims
+        # any IndexJob left `queued`/`running` by a previous process that
+        # crashed/restarted before it could finish -- see
+        # `codepulse.jobs.reap_stale_jobs`'s own docstring for why a
+        # startup-time reconciliation (not a heartbeat/timeout) is the
+        # correct mechanism here. Same fail-open philosophy as hydration
+        # above: a failure here is logged, not fatal to engine startup.
+        try:
+            reaped = reap_stale_jobs(self.storage)
+            if reaped:
+                logger.warning("Reaped %d stale index job(s) at startup: %s", len(reaped), reaped)
+        except Exception as e:
+            logger.warning("Startup job reaping failed (continuing without it): %s", e)
 
     def _resolve_repo_id(self, repo_name: str, repo_url: str) -> int:
         """

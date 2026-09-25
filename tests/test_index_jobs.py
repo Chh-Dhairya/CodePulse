@@ -30,6 +30,7 @@ from codepulse.jobs import (
     mark_failed,
     mark_running,
     mark_succeeded,
+    reap_stale_jobs,
 )
 from codepulse.storage.db import RepositoryModel, StorageManager
 
@@ -195,5 +196,89 @@ def test_get_active_job_is_scoped_to_its_own_repository(storage):
 
     assert get_active_job(storage, repo_a) is not None
     assert get_active_job(storage, repo_b) is None
+
+
+# --- reap_stale_jobs (backend-hardening addition, not a roadmap sprint item) -
+
+def test_reap_stale_jobs_marks_a_running_job_failed(storage):
+    repo_id = _seed_repo(storage)
+    job = create_job(storage, repo_id)
+    mark_running(storage, job.id)
+
+    reaped = reap_stale_jobs(storage)
+
+    assert reaped == [job.id]
+    reloaded = get_job(storage, job.id)
+    assert reloaded.status == "failed"
+    assert reloaded.finished_at is not None
+    assert "Reaped at startup" in reloaded.error_message
+
+
+def test_reap_stale_jobs_marks_a_queued_job_failed(storage):
+    """A job that never even reached `running` (the process crashed
+    before its background task started) must be reaped too -- `queued`
+    is one of `ACTIVE_STATUSES`, the same set `get_active_job` checks."""
+    repo_id = _seed_repo(storage)
+    job = create_job(storage, repo_id)
+
+    reaped = reap_stale_jobs(storage)
+
+    assert reaped == [job.id]
+    assert get_job(storage, job.id).status == "failed"
+
+
+def test_reap_stale_jobs_leaves_terminal_jobs_untouched(storage):
+    repo_id = _seed_repo(storage)
+    succeeded_job = create_job(storage, repo_id)
+    mark_succeeded(storage, succeeded_job.id, {"total_files": 1})
+    failed_job = create_job(storage, repo_id)
+    mark_failed(storage, failed_job.id, "a real, pre-existing failure")
+
+    reaped = reap_stale_jobs(storage)
+
+    assert reaped == []
+    assert get_job(storage, succeeded_job.id).status == "succeeded"
+    assert get_job(storage, failed_job.id).status == "failed"
+    assert get_job(storage, failed_job.id).error_message == "a real, pre-existing failure"
+
+
+def test_reap_stale_jobs_with_no_jobs_at_all_is_a_safe_no_op(storage):
+    assert reap_stale_jobs(storage) == []
+
+
+def test_reap_stale_jobs_reclaims_the_advisory_lock_for_a_new_indexing_attempt(storage):
+    """The concrete, user-visible consequence this fix exists to
+    prevent: without reaping, a crashed `running` job would permanently
+    block get_active_job's advisory lock for its repository, refusing
+    every future indexing attempt forever."""
+    repo_id = _seed_repo(storage)
+    stuck_job = create_job(storage, repo_id)
+    mark_running(storage, stuck_job.id)
+    assert get_active_job(storage, repo_id) is not None, "sanity: the stuck job IS currently active"
+
+    reap_stale_jobs(storage)
+
+    assert get_active_job(storage, repo_id) is None, (
+        "a reaped job must no longer block the advisory lock for new indexing attempts"
+    )
+
+
+def test_reap_stale_jobs_across_multiple_repositories_and_jobs(storage):
+    repo_a = _seed_repo(storage, "repo-a-reap")
+    repo_b = _seed_repo(storage, "repo-b-reap")
+    running_a = create_job(storage, repo_a)
+    mark_running(storage, running_a.id)
+    queued_b = create_job(storage, repo_b)
+
+    reaped = reap_stale_jobs(storage)
+
+    assert set(reaped) == {running_a.id, queued_b.id}
+
+# The end-to-end proof that IndexingEngine.__init__ actually calls this
+# function on every fresh engine construction (not just the standalone
+# function in isolation, tested above) lives in
+# tests/test_restart_idempotency.py, which already has the real,
+# module-shared CodeEmbedder fixture this integration test needs --
+# see test_stale_index_job_is_reaped_on_fresh_engine_construction there.
 
 

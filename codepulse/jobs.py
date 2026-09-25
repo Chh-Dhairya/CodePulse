@@ -29,7 +29,11 @@ do not infer these belong here):
     subprocess/worker infrastructure for a "crashed worker" to even be a
     distinct case from "this process's background task raised" -- the
     latter IS handled here, via `mark_failed`, since `run_indexing`'s own
-    try/except in `api/app.py` calls it on any exception).
+    try/except in `api/app.py` calls it on any exception). Backend-hardening
+    addition (not a roadmap sprint item): `reap_stale_jobs` below IS that
+    reaper, added later -- see its own docstring for why a startup-time
+    reconciliation, not a heartbeat/timeout, is the correct mechanism for
+    this project's actual single-process architecture.
   - `RepositorySnapshot` / git commit tracking / incremental indexing
     (roadmap §9, explicitly Phase 3 sprint items 3.1-3.5) -- this module
     has no concept of a snapshot; `IndexingEngine.index_directory()` is
@@ -180,6 +184,67 @@ def mark_failed(storage: StorageManager, job_id: int, error: str) -> None:
         session.close()
     from codepulse.observability import indexing_jobs_total
     indexing_jobs_total.labels(status="failed").inc()
+
+
+def reap_stale_jobs(storage: StorageManager) -> list[int]:
+    """
+    Backend-hardening addition (not a roadmap sprint item) -- closes the
+    one remaining gap this module's own docstring has disclosed since
+    Phase 1.3: a `running` job whose background task is killed by a real
+    process crash used to stay `running` forever, permanently blocking
+    `get_active_job`'s advisory lock for that repository (every future
+    indexing attempt would see an "active" job that can never finish and
+    refuse to start).
+
+    Deliberately a STARTUP-TIME reconciliation, not a heartbeat/timeout
+    mechanism: this project runs indexing as in-process `BackgroundTasks`
+    coroutines (roadmap §8's own "advisory lock... this project runs
+    indexing as in-process background tasks, not multiple concurrent
+    worker processes" framing, already established for `get_active_job`),
+    with no persisted "which process owns this job" tracking and no
+    heartbeat column anywhere in the schema. In that architecture, a job
+    still `queued`/`running` at the moment a NEW `IndexingEngine` is
+    constructed can only be a leftover from a PREVIOUS process that no
+    longer exists -- the current process could not have created it (it
+    just started), and no other process could be concurrently progressing
+    it (this project has no distributed worker pool). A timeout-based
+    heuristic would need a new column, a migration, and an arbitrary
+    staleness threshold that either reaps a genuinely slow-but-healthy
+    job too early or a genuinely crashed one too late; this mechanism
+    needs neither and cannot produce a false positive for THIS
+    architecture's actual failure mode.
+
+    Reuses `mark_failed` (not a hand-rolled column update) so this stays
+    the single source of truth for what a `-> failed` transition means,
+    including its own existing `indexing_jobs_total{status="failed"}`
+    metric increment -- a reaped job is counted exactly like any other
+    real failure, not a separate, uncounted code path.
+
+    Called once from `IndexingEngine.__init__`, mirroring `hydrate_all`'s
+    own "reconcile whatever happened before this process began"
+    philosophy and timing. Returns the ids of every job reaped (empty if
+    none were stale) -- primarily for logging/testing, not a public API.
+    """
+    session = storage.get_session()
+    try:
+        stale_ids = [
+            job.id
+            for job in session.query(IndexJobModel)
+            .filter(IndexJobModel.status.in_(ACTIVE_STATUSES))
+            .all()
+        ]
+    finally:
+        session.close()
+
+    for job_id in stale_ids:
+        mark_failed(
+            storage,
+            job_id,
+            "Reaped at startup: this job was still queued/running when the "
+            "previous process ended (crash, restart, or forced shutdown) "
+            "and can never complete.",
+        )
+    return stale_ids
 
 
 def get_job(storage: StorageManager, job_id: int) -> JobInfo | None:
