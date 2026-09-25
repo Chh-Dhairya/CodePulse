@@ -682,17 +682,29 @@ def autocomplete(
     limit: int = 10,
     auth: AuthorizedKey = Depends(require_api_key),
 ):
-    # Phase 1.2: authentication only. This endpoint has no repository_id
-    # parameter at all -- it already searches the global in-memory engine
-    # state unscoped by repository (a pre-existing limitation documented
-    # since Phase 0.7, not something this milestone's literal scope -- "a
-    # FastAPI dependency injected into every route" -- extends to fixing;
-    # doing so would mean redesigning this endpoint's signature, which is
-    # 1.3+-shaped scope creep, not 1.2).
+    # Phase 1.2: authentication only, no required repository_id parameter
+    # -- deliberately kept as a "no repository concept" endpoint (like
+    # feedback/ingestion), not redesigned into a repository_id-scoped
+    # route the way /v1/search is. An UNSCOPED key's behavior is
+    # therefore unchanged from Phase 1.2: it still sees suggestions
+    # blended across every repository currently in memory, matching the
+    # tested convention `tests/test_api_authorization.py` documents
+    # ("endpoints with no repository concept... succeed with an
+    # unscoped key").
+    #
+    # Backend-hardening fix (not a roadmap sprint item): a key that IS
+    # scoped to specific repositories used to leak suggestions from
+    # EVERY repository regardless -- a real, previously-undisclosed
+    # cross-repository data leak (the same class of bug Phase 3.4/5.1
+    # each found and fixed for other endpoints, just never revisited
+    # here). Now filtered so a scoped key only ever sees suggestions
+    # from repositories it actually holds a grant for.
     prefix_lower = prefix.lower()
     matches = []
 
     for doc_id, sym in indexing_engine.symbols_by_id.items():
+        if auth.repository_ids and indexing_engine.symbol_repo_map.get(doc_id) not in auth.repository_ids:
+            continue
         if sym.name.lower().startswith(prefix_lower):
             matches.append({
                 "name": sym.name,
@@ -789,9 +801,23 @@ def get_repository_stats(repo_id: int, auth: AuthorizedKey = Depends(require_api
         file_count = repo.file_count if repo else len(indexing_engine.parse_results)
         symbol_count = repo.symbol_count if repo else len(indexing_engine.symbols_by_id)
 
-        # Language distribution
+        # Language distribution.
+        #
+        # Backend-hardening fix (not a roadmap sprint item): this used to
+        # iterate `indexing_engine.parse_results.values()` unfiltered --
+        # a real, previously-undisclosed cross-repository leak, since
+        # that dict holds every currently-indexed repository's parsed
+        # files. A caller authorized for THIS repo_id (the check above)
+        # would get a language/file/symbol breakdown blended with every
+        # OTHER repository this engine has ever parsed in-process. Now
+        # scoped by the same `"{repo_id}::"` key-prefix filter
+        # `analyze_module_structure` already established for the exact
+        # same dict.
+        prefix = f"{repo_id}::"
         langs: dict[str, dict[str, int]] = {}
-        for res in indexing_engine.parse_results.values():
+        for key, res in indexing_engine.parse_results.items():
+            if not key.startswith(prefix):
+                continue
             l = res.language
             if l not in langs:
                 langs[l] = {"files": 0, "symbols": 0}
