@@ -2,7 +2,7 @@
 
 *A recommendation and implementation plan for both, originally written against verified checkpoint `c5e4cc5`. Grounded in the actual current REST/CLI/MCP surfaces (verified directly against the code, not assumed) and the roadmap's own §23/§24/B22/B23 design intent, not invented from scratch.*
 
-**Status update, checkpoint `[pending]`:** Section 2's two backend gaps have since been CLOSED — `GET /v1/repositories` and `GET /v1/repositories/{repo_id}/resolve` both now exist (see `CODEPULSE_PROGRESS.md`'s own "VS Code extension Phase 0" entry for the full detail). Section 2 and each plan's own "Phase 0" below are kept as-written for the historical reasoning, with a note added at each to avoid this document going stale the way `CODEPULSE_PROGRESS.md` itself once did. The extension's own Phase 1 (a separate `codepulse-vscode` repo) has NOT been started.
+**Status update, checkpoint `4221f98`:** Section 2's two backend gaps have since been CLOSED — `GET /v1/repositories` and `GET /v1/repositories/{repo_id}/resolve` both now exist (see `CODEPULSE_PROGRESS.md`'s own "VS Code extension Phase 0" entry for the full detail). Section 2 and each plan's own "Phase 0" below are kept as-written for the historical reasoning, with a note added at each to avoid this document going stale the way `CODEPULSE_PROGRESS.md` itself once did. The extension's own Phase 1 (a separate `codepulse-vscode` repo) has NOT been started.
 
 ---
 
