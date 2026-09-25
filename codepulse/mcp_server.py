@@ -48,8 +48,6 @@ with no MCP caller at the time, by that milestone's own explicit
 approved scope) its first MCP surface, matching the REST/CLI query
 surfaces added in the same pass.
 """
-from __future__ import annotations
-
 from typing import Any, Optional
 
 from mcp.server.fastmcp import FastMCP
