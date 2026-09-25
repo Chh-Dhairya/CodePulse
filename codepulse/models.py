@@ -7,12 +7,19 @@ from pydantic import BaseModel, Field
 
 
 class SymbolType(str, Enum):
+    # Backend-hardening cleanup (not a roadmap sprint item): INTERFACE and
+    # VARIABLE were removed here -- grep-confirmed, before removal, to be
+    # produced by neither parser (codepulse/parser/python.py,
+    # codepulse/parser/javascript.py) and referenced nowhere else in the
+    # codebase or test suite, and confirmed absent from every row in the
+    # real codepulse.db's own symbols table. If a future parser needs to
+    # classify variables or interfaces as their own symbol kind, add the
+    # value back deliberately at that point, backed by a real producer,
+    # rather than carrying an always-empty classification indefinitely.
     FUNCTION = "function"
     METHOD = "method"
     CLASS = "class"
     MODULE = "module"
-    INTERFACE = "interface"
-    VARIABLE = "variable"
 
 
 class Symbol(BaseModel):

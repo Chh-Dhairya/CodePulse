@@ -183,7 +183,14 @@ class SearchRequest(BaseModel):
 
 
 class IndexRepoRequest(BaseModel):
-    repository_id: Optional[int] = None
+    # Backend-hardening cleanup (not a roadmap sprint item): a
+    # `repository_id` field used to be declared here but was never read
+    # anywhere in `index_repository`'s body -- grep-confirmed dead before
+    # removal. The route always resolves the real repository id itself,
+    # via `_resolve_repo_id(repo_name, req.url)`, keyed on `url` (the
+    # same natural-key identity `IndexingEngine.index_directory` uses
+    # internally) -- a caller has never needed to (and could not
+    # meaningfully) supply this id up front.
     source: str = "local"  # "local", "github", "gitlab"
     url: str  # local path or git URL
     branch: str = "main"

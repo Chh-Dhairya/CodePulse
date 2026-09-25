@@ -255,6 +255,47 @@ def test_hydrate_repository_reports_hydrated_symbol_count(tmp_path, shared_embed
     assert engine1.bm25_index.num_docs == symbol_count
 
 
+def test_lexical_hydration_skips_a_symbol_row_with_an_unrecognized_type(tmp_path, shared_embedder):
+    """
+    Backend-hardening cleanup (not a roadmap sprint item): `SymbolType.
+    VARIABLE`/`INTERFACE` were removed from the enum as genuinely dead
+    (produced by no parser, referenced nowhere, absent from the real
+    codepulse.db). This test proves the ALREADY-EXISTING defensive
+    fallback in `hydrate_repository` -- added when lexical hydration was
+    first built, but never directly exercised by any test until now --
+    correctly SKIPS (rather than crashes on) a symbol row whose `type`
+    column doesn't parse as any current `SymbolType` member, exactly the
+    shape a stray legacy/foreign value (like the now-removed "variable"/
+    "interface") would take if one ever existed. `symbols.type` is a
+    plain, DB-unconstrained `String(50)` -- nothing at the schema level
+    prevents this, so the defensive code path is a real safety net, not
+    dead code itself.
+    """
+    db_path = tmp_path / "t2e.db"
+    db_url = f"sqlite:///{str(db_path).replace(os.sep, '/')}"
+    repo_path = _make_repo_dir(tmp_path, "repo_bad_type", SAMPLE_FILES)
+
+    engine1 = _new_engine(db_url, shared_embedder)
+    engine1.index_directory(repo_path, repo_name="repo_bad_type", repo_url=repo_path)
+
+    session = engine1.storage.get_session()
+    try:
+        sym = session.query(SymbolModel).one()
+        sym.type = "variable"  # a value no current SymbolType member matches
+        session.commit()
+    finally:
+        session.close()
+
+    # Fresh engine, same database -- exercises hydrate_repository via the
+    # real __init__ path, not a direct call, matching how this would
+    # actually be hit in production.
+    engine2 = _new_engine(db_url, shared_embedder)
+
+    assert engine2.bm25_index.num_docs == 0, (
+        "the sole symbol row has an unrecognized type and must be skipped, not hydrated"
+    )
+
+
 # --- 5. Re-indexing unchanged content: no duplicate embedding rows ---------
 
 def test_reindexing_unchanged_content_reuses_embedding_row(tmp_path, shared_embedder):
