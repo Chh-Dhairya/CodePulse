@@ -1,6 +1,8 @@
 # CodePulse — Client Strategy: VS Code Extension vs. Web UI
 
-*A recommendation and implementation plan for both, written against verified checkpoint `c5e4cc5`. This is a planning document only — no implementation code was written or changed to produce it. Grounded in the actual current REST/CLI/MCP surfaces (verified directly against the code, not assumed) and the roadmap's own §23/§24/B22/B23 design intent, not invented from scratch.*
+*A recommendation and implementation plan for both, originally written against verified checkpoint `c5e4cc5`. Grounded in the actual current REST/CLI/MCP surfaces (verified directly against the code, not assumed) and the roadmap's own §23/§24/B22/B23 design intent, not invented from scratch.*
+
+**Status update, checkpoint `[pending]`:** Section 2's two backend gaps have since been CLOSED — `GET /v1/repositories` and `GET /v1/repositories/{repo_id}/resolve` both now exist (see `CODEPULSE_PROGRESS.md`'s own "VS Code extension Phase 0" entry for the full detail). Section 2 and each plan's own "Phase 0" below are kept as-written for the historical reasoning, with a note added at each to avoid this document going stale the way `CODEPULSE_PROGRESS.md` itself once did. The extension's own Phase 1 (a separate `codepulse-vscode` repo) has NOT been started.
 
 ---
 
@@ -34,12 +36,14 @@ The roadmap's own §24 calls the dependency-graph visualization "CodePulse's mos
 
 ## 2. Two small, real backend gaps found while planning this
 
+**✅ RESOLVED — both built.** This section is kept as originally written (the reasoning is still accurate history), but both gaps below have since been closed: `GET /v1/repositories` and `GET /v1/repositories/{repo_id}/resolve?path=&line=` both exist now, each regression-tested (10 new tests), full suite 579 passed / 1 skipped. See `CODEPULSE_PROGRESS.md`'s "VS Code extension Phase 0" entry for the complete implementation detail.
+
 Verified directly against the code before writing the plans below — these are not covered by the earlier backend-gap audit or its recheck, because they only became relevant once actually designing a client around the API's current shape.
 
 1. **No "list all indexed repositories" endpoint.** Every repository-scoped route (`/v1/repositories/{id}/stats`, `/index-status`, `/modules`, etc.) needs a `repo_id` the caller already knows. There is no `GET /v1/repositories` to enumerate what's indexed. A web dashboard's very first screen ("here's what's indexed") needs this; a VS Code extension opening an unfamiliar workspace would benefit from it too (today it would have to call `POST /v1/repositories/index` — idempotent, but heavier than a plain lookup — just to resolve a workspace path to a `repo_id`).
 2. **No "resolve symbol at file + line" capability.** `GET /v1/symbols/{id}` needs a numeric symbol id; `GET /v1/files/{file_id}/symbols` needs a numeric file id. Neither exists for "what symbol contains line 42 of `auth.py`" — which is exactly what a hover provider or CodeLens needs to answer for the cursor's current position. This isn't just a missing REST route; the underlying engine has no method for it either (`_resolve_symbol` in the CLI matches by *name*, not by *location*).
 
-Both are small, self-contained, low-risk additions (a new read-only query each, no schema change) — flagged here for visibility, not yet built. They'd naturally land as Phase 0 of the VS Code extension plan below.
+Both were small, self-contained, low-risk additions (a new read-only query each, no schema change) — now built as Phase 0 of the VS Code extension plan below.
 
 ---
 
@@ -47,9 +51,9 @@ Both are small, self-contained, low-risk additions (a new read-only query each, 
 
 Scope per the roadmap's own §23: *"command-palette search, go-to-symbol, 'find references,' 'impact analysis' panel, 'similar code' panel, and a status-bar indexing indicator... the extension is a thin presentation layer, never reimplementing retrieval logic client-side."* B22's DoD: *"Search/symbol/impact panels functional against a real server."*
 
-### Phase 0 — Backend prerequisites (small, in this repo)
-- `GET /v1/repositories` — list indexed repositories (id, name, url, file/symbol counts, last-indexed time). Thin wrapper over an existing query pattern (`RepositoryModel`), gated by which repos the caller's key is scoped to.
-- A "resolve symbol at location" capability — either `GET /v1/files/by-path?repo_id=&path=` (to get a `file_id`) composed with the existing `/v1/files/{file_id}/symbols`, or a single new `GET /v1/repositories/{id}/resolve?path=&line=` doing both steps server-side. The latter is fewer round trips for the extension and keeps "which symbol contains this line" logic in the shared core rather than duplicated client-side — consistent with CLAUDE.md's own "REST/CLI/MCP call the same underlying functions" rule.
+### Phase 0 — Backend prerequisites (small, in this repo) — ✅ DONE
+- `GET /v1/repositories` — list indexed repositories (id, name, url, file/symbol counts, last-indexed time). Thin wrapper over an existing query pattern (`RepositoryModel`), gated by which repos the caller's key is scoped to. **Built and shipped** (see `CODEPULSE_PROGRESS.md`'s "VS Code extension Phase 0" entry).
+- A "resolve symbol at location" capability — either `GET /v1/files/by-path?repo_id=&path=` (to get a `file_id`) composed with the existing `/v1/files/{file_id}/symbols`, or a single new `GET /v1/repositories/{id}/resolve?path=&line=` doing both steps server-side. The latter is fewer round trips for the extension and keeps "which symbol contains this line" logic in the shared core rather than duplicated client-side — consistent with CLAUDE.md's own "REST/CLI/MCP call the same underlying functions" rule. **Built exactly this way and shipped** — `GET /v1/repositories/{repo_id}/resolve?path=&line=`, preferring the narrowest matching symbol.
 
 ### Phase 1 — Foundation (new repo: `codepulse-vscode`, TypeScript)
 - Per the roadmap's own B22 framing ("New extension repo/package"), this lives outside `codepulse/` as its own package — a VS Code extension is a fundamentally different tech stack (TypeScript, the `vscode` extension API), not a few files bolted onto the Python backend.
@@ -79,8 +83,8 @@ Scope per the roadmap's own §23: *"command-palette search, go-to-symbol, 'find 
 
 Scope per the roadmap's own §24: *"repository dashboard (indexing status/freshness), a search box with results linking to source, a symbol detail view showing callers/callees, and a dependency-graph visualization... Do not build a generic 'developer portal' — every UI element should expose retrieval/graph intelligence the CLI/API already has, nothing new."* B23's DoD: *"Dashboard + search + symbol view + dependency graph render correctly."*
 
-### Phase 0 — Backend prerequisites (same as the extension's Phase 0)
-- `GET /v1/repositories` — the dashboard's very first screen needs this list; without it there is no dashboard.
+### Phase 0 — Backend prerequisites (same as the extension's Phase 0) — ✅ DONE
+- `GET /v1/repositories` — the dashboard's very first screen needs this list; without it there is no dashboard. **Built and shipped** alongside the extension's own Phase 0 (see `CODEPULSE_PROGRESS.md`'s "VS Code extension Phase 0" entry) — the Web UI plan needs nothing further from Phase 0.
 - No location-resolution endpoint is needed here (the web UI doesn't have a "cursor position" the way an editor does) — this is a case where the two clients genuinely need different small backend additions, not identical ones.
 
 ### Phase 1 — Foundation (new repo: `codepulse-web`)
@@ -120,8 +124,8 @@ Everything from the original backend-gap audit and its follow-up recheck is done
 - Search-index segments still have no literal on-disk persistence (mitigated, not solved, by the SQL-rehydration fix built earlier this session).
 - `SymbolType.MODULE` looks unproduced by either parser (noticed during the recent dead-code cleanup, deliberately not acted on — a candidate for its own small, separate decision later).
 
-### The two new gaps this document itself found
-- `GET /v1/repositories` (list endpoint) — needed by both clients' Phase 0.
-- A "resolve symbol by file+line" capability — needed by the VS Code extension's Phase 0 specifically.
+### The two new gaps this document itself found — ✅ RESOLVED
+- `GET /v1/repositories` (list endpoint) — needed by both clients' Phase 0. **Built.**
+- A "resolve symbol by file+line" capability — needed by the VS Code extension's Phase 0 specifically. **Built**, as `GET /v1/repositories/{repo_id}/resolve?path=&line=`.
 
-None of the above has been started. This document is the plan; the next step, whenever you're ready, is picking a starting point (most likely the VS Code extension's Phase 0/1, per the recommendation above) and working through it the same one-milestone-at-a-time way the rest of this project has been built.
+**Status**: Phase 0 (both backend prerequisites above) is complete and merged into this repo. Everything else in this document -- the extension's own Phase 1 onward (a separate `codepulse-vscode` repo), the entire Web UI plan, and every genuinely-blocked roadmap item -- has NOT been started. The next step, whenever you're ready, is the VS Code extension's Phase 1 (a new TypeScript repo/package, connecting to the REST/MCP surface Phase 0 just completed), worked through the same one-milestone-at-a-time way the rest of this project has been built.

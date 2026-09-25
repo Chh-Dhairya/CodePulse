@@ -1123,3 +1123,133 @@ def get_repository_modules(repo_id: int, auth: AuthorizedKey = Depends(require_a
         "ranked_by_inbound": module_graph.rank_by_inbound(),
         "ranked_by_outbound": module_graph.rank_by_outbound(),
     }
+
+
+# -------------------------------------------------------------
+# 16. List Repositories (GET /v1/repositories)
+#
+# Backend-hardening addition (not a roadmap sprint item) -- Phase 0 of
+# `CODEPULSE_CLIENT_STRATEGY.md`'s VS Code extension plan (and the Web
+# UI plan's own Phase 0): every existing repository-scoped route needs
+# a `repo_id` the caller already knows -- there was no way to enumerate
+# which repositories a key is even authorized for. A client opening an
+# unfamiliar workspace (the extension) or building its first dashboard
+# screen (the Web UI) both need exactly this.
+# -------------------------------------------------------------
+@app.get("/v1/repositories")
+def list_repositories(auth: AuthorizedKey = Depends(require_api_key)):
+    """
+    Lists every repository the CALLING KEY actually holds a grant for --
+    never every repository in the database. An unscoped key (no grants
+    at all) gets an empty list, not an error and not every repository
+    in the system: matches Phase 1.2's own "no wildcard/superuser key"
+    design (an unscoped key is authenticated but authorized for NO
+    repository-scoped operation) exactly, the same rule every other
+    repository-scoped route already enforces via `authorize_repository`.
+    """
+    if not auth.repository_ids:
+        return {"repositories": []}
+
+    session = storage_manager.get_session()
+    try:
+        repos = (
+            session.query(RepositoryModel)
+            .filter(RepositoryModel.id.in_(auth.repository_ids))
+            .order_by(RepositoryModel.id)
+            .all()
+        )
+        return {
+            "repositories": [
+                {
+                    "repository_id": r.id,
+                    "name": r.name,
+                    "url": r.url,
+                    "branch": r.branch,
+                    "file_count": r.file_count,
+                    "symbol_count": r.symbol_count,
+                    "last_sync": r.last_sync.isoformat() if r.last_sync else None,
+                }
+                for r in repos
+            ]
+        }
+    finally:
+        session.close()
+
+
+# -------------------------------------------------------------
+# 17. Resolve Symbol at Location (GET /v1/repositories/{repo_id}/resolve)
+#
+# Backend-hardening addition (not a roadmap sprint item) -- the second
+# Phase 0 prerequisite from `CODEPULSE_CLIENT_STRATEGY.md`'s VS Code
+# extension plan specifically: a hover provider or CodeLens needs to
+# answer "what symbol contains line N of this file," and neither
+# `GET /v1/symbols/{id}` (needs a symbol id) nor
+# `GET /v1/files/{id}/symbols` (needs a file id, returns every symbol
+# in the file, not just the one at a specific line) answers that
+# directly. Resolving by (repo_id, path, line) server-side, in one
+# call, keeps "which symbol contains this line" logic in the shared
+# intelligence core rather than duplicated client-side -- CLAUDE.md's
+# own "REST/CLI/MCP call the same underlying functions" rule, applied
+# to a brand-new capability rather than an existing engine method.
+# -------------------------------------------------------------
+@app.get("/v1/repositories/{repo_id}/resolve")
+def resolve_symbol_at_location(
+    repo_id: int,
+    path: str = Query(..., min_length=1),
+    line: int = Query(..., ge=1),
+    auth: AuthorizedKey = Depends(require_api_key),
+):
+    """
+    Finds the symbol in `path` (a file path relative to the repository
+    root, exactly as stored in `FileModel.path`) that CONTAINS `line`
+    (1-indexed, inclusive of `start_line`/`end_line`). When a line falls
+    inside more than one symbol's range at once (e.g. a method's own
+    line range is nested inside its enclosing class's range), the
+    NARROWEST-range match wins -- the most specific symbol actually at
+    that line, matching what a hover/CodeLens caller actually wants
+    (the method, not the whole class). Returns `{"symbol": null}` (200,
+    not 404) for a real file with no symbol at that exact line (e.g. a
+    blank line, an import, or a comment) -- a real, valid outcome, not
+    an error. 404 is reserved for the file itself not being found in
+    this repository.
+    """
+    auth.authorize_repository(repo_id)
+    session = storage_manager.get_session()
+    try:
+        file_record = (
+            session.query(FileModel)
+            .filter(FileModel.repo_id == repo_id, FileModel.path == path)
+            .first()
+        )
+        if file_record is None:
+            raise HTTPException(status_code=404, detail=f"File not found in this repository: {path!r}")
+
+        candidates = (
+            session.query(SymbolModel)
+            .filter(
+                SymbolModel.file_id == file_record.id,
+                SymbolModel.start_line <= line,
+                SymbolModel.end_line >= line,
+            )
+            .all()
+        )
+        if not candidates:
+            return {"repository_id": repo_id, "file": path, "line": line, "symbol": None}
+
+        narrowest = min(candidates, key=lambda s: (s.end_line - s.start_line, s.start_line))
+        return {
+            "repository_id": repo_id,
+            "file": path,
+            "line": line,
+            "symbol": {
+                "symbol_id": narrowest.id,
+                "name": narrowest.name,
+                "type": narrowest.type,
+                "line_start": narrowest.start_line,
+                "line_end": narrowest.end_line,
+                "docstring": narrowest.docstring,
+                "complexity": narrowest.complexity,
+            },
+        }
+    finally:
+        session.close()
