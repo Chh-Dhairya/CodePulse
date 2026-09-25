@@ -76,6 +76,19 @@ dependencies = [
     # AI / Embeddings
     "sentence-transformers>=3.0.0,<3.1.0",
     "torch>=2.3.0,<2.4.0",
+    # `numpy` was never pinned here -- purely a transitive dependency of
+    # torch/sentence-transformers/tantivy -- so a fresh `pip install -e .`
+    # resolves it to whatever's latest (2.x). The pinned `torch==2.3.x`
+    # CPU wheel above was built against NumPy 1.x's C API, so that
+    # combination fails at import time ("Failed to initialize NumPy:
+    # _ARRAY_API not found"), silently degrading `IndexingEngine` to
+    # lexical-only indexing (an honest, disclosed fallback -- see
+    # `codepulse/embeddings/embedder.py` -- but NOT what anyone
+    # installing this project actually wants). Pinned explicitly so a
+    # fresh install gets working embeddings from the start, not a
+    # confusing runtime warning discovered only once indexing is already
+    # running.
+    "numpy<2",
 
     # CLI Output (Phase 0.9: cli.py has always used Rich, but it was never
     # actually declared -- it only worked because something else happened to
