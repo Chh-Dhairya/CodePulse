@@ -30,6 +30,26 @@ if sys.platform == "win32":
         pass
 
 console = Console(safe_box=True)
+_stderr_console = Console(safe_box=True, stderr=True)
+
+
+def _display_db_path(db_url: str) -> str:
+    """
+    Resolves a `sqlite:///<path>` URL's <path> component to an absolute
+    path (against the CURRENT working directory, matching how
+    `create_engine` itself would resolve it) purely for display -- so
+    "which exact file is this command about to touch" is unambiguous,
+    regardless of whether `db_url` came from a CLI flag, an env var, a
+    relative `codepulse.toml` entry, or the plain relative default.
+    Non-sqlite URLs (e.g. a future Postgres backend) are shown as-is.
+    """
+    prefix = "sqlite:///"
+    if not db_url.startswith(prefix):
+        return db_url
+    raw_path = db_url[len(prefix):]
+    if os.path.isabs(raw_path):
+        return db_url
+    return prefix + os.path.abspath(raw_path).replace(os.sep, "/")
 
 
 def cmd_parse(args: argparse.Namespace) -> None:
@@ -752,7 +772,36 @@ def main() -> None:
         cli_overrides["embedding_model"] = args.embedding_model
 
     from codepulse.config import get_settings
-    get_settings(config_file=args.config, cli_overrides=cli_overrides, reload=True)
+    settings = get_settings(config_file=args.config, cli_overrides=cli_overrides, reload=True)
+
+    # Backend-hardening addition (not a roadmap sprint item): db_url
+    # defaults to "sqlite:///codepulse.db", resolved relative to the
+    # CURRENT WORKING DIRECTORY -- with zero prior feedback about which
+    # actual file that is. Running the same command from two different
+    # directories has always silently used two different databases (no
+    # error, no warning), a real footgun this discloses up front rather
+    # than leaving a user to discover it only once results look wrong.
+    # Skipped for `parse` and `init`, which never touch a database at all.
+    if args.command not in ("parse", "init"):
+        resolved_db = _display_db_path(settings.db_url)
+        db_file = resolved_db[len("sqlite:///"):] if resolved_db.startswith("sqlite:///") else None
+        # A resolved path is genuinely more alarming when the file
+        # doesn't exist yet -- that means THIS command is about to
+        # silently create a brand-new, empty database (the exact
+        # "wrong directory" mistake this whole diagnostic exists to
+        # catch), not just reuse one that already has prior work in
+        # it. A quiet path-only line doesn't mean much to a user who
+        # has no reason yet to suspect anything is wrong; "a new,
+        # empty database is being created" does.
+        if db_file is not None and not os.path.exists(db_file):
+            _stderr_console.print(
+                f"[yellow]⚠ No existing database found -- creating a NEW, empty one at:[/yellow]\n"
+                f"[yellow]  {resolved_db}[/yellow]\n"
+                f"[dim]If you expected to reuse an existing database instead, check your current "
+                f"directory, or set --db-url / CODEPULSE_DB_URL explicitly.[/dim]"
+            )
+        else:
+            _stderr_console.print(f"[dim]Using database: {resolved_db}[/dim]")
 
     if args.command == "parse":
         cmd_parse(args)

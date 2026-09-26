@@ -295,3 +295,27 @@ def test_resolve_mcp_api_key_returns_none_when_neither_is_set():
 
 def test_resolve_mcp_api_key_treats_an_empty_string_cli_value_as_unset():
     assert cli.resolve_mcp_api_key("", {"CODEPULSE_MCP_API_KEY": "env-key"}) == "env-key"
+
+
+# --- _display_db_path (main()'s "Using database: ..." diagnostic) ---------
+# Not a roadmap sprint item -- db_url defaults to a CWD-relative
+# "sqlite:///codepulse.db" with no prior feedback about which absolute
+# file that actually is, so the same command run from two different
+# directories silently uses two different databases. Confirmed directly
+# with a real user hitting this twice in one session. This one small
+# pure function (the rest of main()'s dispatch isn't unit-tested here,
+# see this module's own docstring above) resolves a relative sqlite
+# path to an absolute one purely for display.
+
+def test_display_db_path_resolves_a_relative_sqlite_path_to_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    shown = cli._display_db_path("sqlite:///codepulse.db")
+    assert shown == f"sqlite:///{str(tmp_path / 'codepulse.db').replace(chr(92), '/')}"
+
+
+def test_display_db_path_leaves_an_already_absolute_sqlite_path_unchanged():
+    assert cli._display_db_path("sqlite:///C:/some/abs/path.db") == "sqlite:///C:/some/abs/path.db"
+
+
+def test_display_db_path_leaves_a_non_sqlite_url_unchanged():
+    assert cli._display_db_path("postgresql://user@host/db") == "postgresql://user@host/db"
