@@ -610,7 +610,12 @@ def test_analyze_impact_after_simulated_restart_and_reindex_returns_correct_resu
     impact_before = engine1.analyze_impact("db_query", "mod.py", repo_id, max_depth=3)
 
     engine2 = _new_engine(db_url, shared_embedder)  # simulated restart
-    assert engine2.call_graphs == {}
+    # 2026-10-12 (user-approved behavior change): the call graph is now
+    # restored from the durable call_edges table at startup, so it is
+    # correct BEFORE any re-index; this precondition used to assert the old
+    # "cold after restart" limitation (`call_graphs == {}`).
+    assert repo_id in engine2.call_graphs
+    assert engine2.analyze_impact("db_query", "mod.py", repo_id, max_depth=3)["callers"]["direct"] == impact_before["callers"]["direct"]
     engine2.index_directory(str(repo), repo_name="r", repo_url=str(repo))
     impact_after = engine2.analyze_impact("db_query", "mod.py", repo_id, max_depth=3)
 

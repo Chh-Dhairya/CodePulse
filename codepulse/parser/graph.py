@@ -138,6 +138,49 @@ class CallGraphBuilder:
         self.inheritance_edge_meta: dict[tuple[tuple[str, str], tuple[str, str]], Optional[str]] = {}
         self._build_graph()
 
+    @classmethod
+    def from_edges(
+        cls,
+        edges: list[CallGraphEdge],
+        inheritance_edges: list[CallGraphEdge],
+    ) -> "CallGraphBuilder":
+        """
+        Rebuilds a graph from ALREADY-RESOLVED edges (the durable
+        `call_edges` rows) instead of from parse results, so a restarted
+        process can answer callers/callees/subclasses without re-parsing
+        the repository.
+
+        Populates exactly the structures `_build_graph` populates, with the
+        same keys (`(file, symbol)` pairs; an unresolved target file is
+        `""`), so every query method behaves identically on a restored
+        graph and a freshly built one. Edges are taken as stored -- no
+        resolution is re-run, so the confidence on each edge is exactly
+        what was computed (and persisted) at index time, including a
+        legacy `None`.
+
+        The one thing a restored graph does NOT have is `resolver`
+        (parsed files / imports): it is empty. Anything needing the parse
+        data -- notably an incremental update, which merges cached parse
+        results for unchanged files -- must not treat a restored graph as
+        its base; `IndexingEngine` tracks that.
+        """
+        graph = cls([])
+        for edge in edges:
+            graph.edges.append(edge)
+            src_key = (edge.source_file, edge.source_symbol_name)
+            tgt_key = (edge.target_file or "", edge.target_symbol_name)
+            graph.adjacency[src_key].add(tgt_key)
+            graph.reverse_adjacency[tgt_key].add(src_key)
+            graph.edge_meta[(src_key, tgt_key)] = (edge.confidence, edge.call_count)
+        for edge in inheritance_edges:
+            graph.inheritance_edges.append(edge)
+            src_key = (edge.source_file, edge.source_symbol_name)
+            tgt_key = (edge.target_file or "", edge.target_symbol_name)
+            graph.inheritance_adjacency[src_key].add(tgt_key)
+            graph.reverse_inheritance_adjacency[tgt_key].add(src_key)
+            graph.inheritance_edge_meta[(src_key, tgt_key)] = edge.confidence
+        return graph
+
     def _resolve_target(
         self, name: str, file_path: str, local_symbols: dict[str, Symbol], import_map: dict[str, str]
     ) -> tuple[Optional[str], str]:

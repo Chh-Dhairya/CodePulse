@@ -213,18 +213,24 @@ def test_repeated_reindex_is_idempotent_and_identifiers_stay_stable(tmp_path, sh
 
 # --- 2. Restart restores durable (semantic + lexical) state, not the call graph
 
-def test_restart_restores_semantic_and_lexical_state_but_not_the_call_graph(tmp_path, shared_embedder):
+def test_restart_restores_semantic_lexical_and_call_graph_state_but_not_symbols_by_id(tmp_path, shared_embedder):
     """
     Backend-hardening addition (not a roadmap sprint item) changed this
     test's own expected behavior, deliberately: `bm25_index` used to be
     entirely non-durable (asserted `== 0`/`keyword_results == []` after
     restart) -- `hydrate_repository` now ALSO rebuilds it from durably
     persisted `symbols`/`files` rows (no re-parse, no re-embed), closing
-    that real, previously-disclosed gap. The call graph and
-    `symbols_by_id` remain genuinely NOT durable -- rebuilding either
-    needs the full parse-result/import-resolution machinery
-    `index_directory()` owns, unchanged by this addition -- so those
-    assertions are unchanged from before.
+    that real, previously-disclosed gap.
+
+    2026-10-12 (user-approved behavior change, found by a real-VS-Code QA
+    run): the call graph is now ALSO restored at startup, from the durable
+    `call_edges` rows (`IndexingEngine._restore_call_graph`), because the
+    previous behavior made callers/impact/references silently report
+    nothing after every restart. This test's `call_graphs == {}` assertion
+    encoded that limitation and was changed deliberately, not weakened:
+    the graph must now be present AND answer the same as before the
+    restart (see tests/test_call_graph_restart_restore.py for the full
+    equivalence checks). `symbols_by_id` remains NOT durable, unchanged.
     """
     repo_path = _make_repo_dir(
         tmp_path,
@@ -260,14 +266,12 @@ def test_restart_restores_semantic_and_lexical_state_but_not_the_call_graph(tmp_
     assert len(keyword_results) >= 1, "keyword search must work immediately after restart, no re-index required"
     assert any(r.symbol_name == "greet" for r in keyword_results)
 
-    # The call graph and the in-memory symbol map remain NOT durable --
-    # there is no backing DB table for either that a plain row-to-object
-    # rehydration can restore from; a fresh engine starts genuinely empty
-    # until index_directory() is called again. This is the actual,
-    # intended architecture, not a defect -- asserted explicitly here so
-    # it can never silently regress into a false "everything survives
-    # restart" claim.
-    assert engine2.call_graphs == {}, "call graphs have no backing table and must not survive restart"
+    # The call graph IS restored (from the durable call_edges table; see
+    # this test's docstring). The in-memory symbol map remains NOT durable
+    # -- a fresh engine starts with it empty until index_directory() runs
+    # again. Asserted explicitly so it can never silently regress into a
+    # false "everything survives restart" claim.
+    assert len(engine2.call_graphs) == len(engine1.call_graphs) > 0, "call graphs are restored from the durable call_edges table"
     assert engine2.symbols_by_id == {}, "in-memory symbol map has no backing table and must not survive restart"
 
 

@@ -16,7 +16,7 @@ from codepulse.git_diff import GitDiffError, detect_file_changes, get_head_commi
 from codepulse.indexer.ignore import RepositoryIgnoreRules
 from codepulse.ingestion_safety import IngestionSafetyError
 from codepulse.jobs import reap_stale_jobs
-from codepulse.models import FileParseResult, Symbol, SymbolType, compute_content_hash
+from codepulse.models import CallGraphEdge, FileParseResult, Symbol, SymbolType, compute_content_hash
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
 from codepulse.parser.module_graph import ModuleGraphBuilder
@@ -136,6 +136,12 @@ class IndexingEngine:
         self.call_graph: CallGraphBuilder | None = None
         self.call_graphs: dict[int, CallGraphBuilder] = {}
         self.parse_results: dict[str, FileParseResult] = {}
+        # Repository ids whose `call_graphs` entry was restored from the
+        # durable `call_edges` rows at startup rather than built from this
+        # process's own parse results. Such a graph answers queries
+        # correctly but has no parse cache behind it, so it can't be the
+        # base of an incremental update (see `_plan_incremental_run`).
+        self._restored_call_graph_repo_ids: set[int] = set()
         self.symbols_by_id: dict[str, Symbol] = {}
         # Phase 0.6: doc_id -> owning RepositoryModel.id, built alongside
         # symbols_by_id, so hybrid search's graph-score step can skip
@@ -271,12 +277,18 @@ class IndexingEngine:
         # run never reaches here) -- see this method's own docstring for
         # why a cold `self.call_graphs` cache (e.g. after a process
         # restart) must also force a full run.
-        if repo_id not in self.call_graphs:
+        if repo_id not in self.call_graphs or repo_id in self._restored_call_graph_repo_ids:
+            # A graph restored from stored edges at startup counts as cold
+            # here: an incremental run merges THIS process's cached parse
+            # results for unchanged files, and a restored graph has none,
+            # so building on it would silently drop their edges.
             return IncrementalPlan(
                 is_incremental=False, changed_relpaths=None,
                 reason=(
                     "no in-memory call graph cached yet for this repository in this "
-                    "process (e.g. after a restart) -- a full re-index is needed to "
+                    "process (e.g. after a restart; stored call edges are restored "
+                    "for queries, but an incremental update also needs this "
+                    "process's parse cache) -- a full re-index is needed to "
                     "fully restore it"
                 ),
             )
@@ -998,6 +1010,7 @@ class IndexingEngine:
         repo_call_graph = CallGraphBuilder(cg_parsed_files)
         self.call_graphs[repo_id] = repo_call_graph
         self.call_graph = repo_call_graph
+        self._restored_call_graph_repo_ids.discard(repo_id)
 
         # 4. Generate Embeddings & Populate Vector Index
         #
@@ -1823,6 +1836,8 @@ class IndexingEngine:
             if hydrated_symbols:
                 self.bm25_index.build()
 
+            self._restore_call_graph(session, repo_record.id)
+
             return {
                 "repo_id": repo_record.id,
                 "hydrated_embeddings": len(doc_ids),
@@ -1831,6 +1846,43 @@ class IndexingEngine:
             }
         finally:
             session.close()
+
+    def _restore_call_graph(self, session, repo_id: int) -> None:
+        """
+        Rebuilds `self.call_graphs[repo_id]` from the durable `call_edges`
+        rows (calls AND inheritance), so callers/callees/impact/references
+        work immediately after a restart instead of silently returning
+        nothing until a re-index (2026-10-12 QA finding).
+
+        Never replaces a graph this process already built from parse
+        results. The restored graph is flagged in
+        `_restored_call_graph_repo_ids` so `_plan_incremental_run` still
+        forces a full run: it has no parse cache behind it.
+        """
+        if repo_id in self.call_graphs:
+            return
+        rows = (
+            session.query(CallEdge)
+            .filter(CallEdge.repo_id == repo_id)
+            .order_by(CallEdge.id)
+            .all()
+        )
+        calls: list[CallGraphEdge] = []
+        inherits: list[CallGraphEdge] = []
+        for row in rows:
+            edge = CallGraphEdge(
+                source_symbol_name=row.source_symbol_name,
+                source_file=row.source_file,
+                target_symbol_name=row.target_symbol_name,
+                target_file=row.target_file,
+                call_count=row.call_count,
+                confidence=row.confidence,
+                relationship_type=row.relationship_type,
+            )
+            (inherits if row.relationship_type == "inherits" else calls).append(edge)
+        graph = CallGraphBuilder.from_edges(calls, inherits)
+        self.call_graphs[repo_id] = graph
+        self._restored_call_graph_repo_ids.add(repo_id)
 
     def hydrate_all(self) -> dict[str, Any]:
         """

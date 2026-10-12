@@ -96,7 +96,10 @@ class CallGraphEdge(BaseModel):
     # set explicitly by CallGraphBuilder._build_graph (see its own
     # comments) -- the "unresolved" default here is a safe fallback for
     # any other construction path, never itself a claim of resolution.
-    confidence: str = "unresolved"
+    # May be None ONLY for a legacy durable `call_edges` row written before
+    # Phase 3.4 added confidence (restored by `CallGraphBuilder.from_edges`);
+    # a graph built from parse results always sets it explicitly.
+    confidence: Optional[str] = "unresolved"
     # Phase 4.1 (roadmap §37 item 4.1): "calls" (default, matching every
     # edge this project has ever persisted before this field existed) or
     # "inherits" (a resolved base-class relationship). Always set
