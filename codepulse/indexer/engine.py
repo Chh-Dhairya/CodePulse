@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+from sqlalchemy import inspect as sa_inspect
 
 from codepulse.embeddings.chunker import CodeChunk, SemanticChunker
 from codepulse.embeddings.embedder import CodeEmbedder, EmbeddingUnavailableError
@@ -27,6 +28,7 @@ from codepulse.storage.db import (
     CallEdge,
     EmbeddingModel,
     FileModel,
+    ModuleEdge,
     RepositoryModel,
     RepositorySnapshotModel,
     StorageManager,
@@ -142,6 +144,13 @@ class IndexingEngine:
         # correctly but has no parse cache behind it, so it can't be the
         # base of an incremental update (see `_plan_incremental_run`).
         self._restored_call_graph_repo_ids: set[int] = set()
+        # Module-structure graphs restored from the durable `module_edges`
+        # rows at startup (repo_id -> graph). Consulted by
+        # `analyze_module_structure` only when this process has no parse
+        # results for that repository; dropped as soon as the repository is
+        # indexed here (the parse cache is then authoritative).
+        self._restored_module_graphs: dict[int, ModuleGraphBuilder] = {}
+        self._warned_module_edges_missing = False
         self.symbols_by_id: dict[str, Symbol] = {}
         # Phase 0.6: doc_id -> owning RepositoryModel.id, built alongside
         # symbols_by_id, so hybrid search's graph-score step can skip
@@ -1011,6 +1020,12 @@ class IndexingEngine:
         self.call_graphs[repo_id] = repo_call_graph
         self.call_graph = repo_call_graph
         self._restored_call_graph_repo_ids.discard(repo_id)
+        # Every parsed file and the resolved file-to-file import edges, from
+        # the SAME complete (merged, on an incremental run) parse set the
+        # call graph was just built from, persisted below so module
+        # structure survives a restart. Clustering is computed on demand.
+        module_snapshot = ModuleGraphBuilder.snapshot(cg_parsed_files)
+        self._restored_module_graphs.pop(repo_id, None)
 
         # 4. Generate Embeddings & Populate Vector Index
         #
@@ -1165,6 +1180,7 @@ class IndexingEngine:
             chunk_embeddings=chunk_embeddings,
             is_incremental=incremental_plan.is_incremental,
             changed_symbol_keys=changed_symbol_keys,
+            module_snapshot=module_snapshot,
         )
 
         # Phase 3.1: record this run's snapshot (commit_sha + embedding
@@ -1359,6 +1375,47 @@ class IndexingEngine:
                 relationship_type=edge.relationship_type,
             ))
 
+    def _module_edges_table_exists(self, session) -> bool:
+        """
+        False on a database that has not been migrated to the revision that
+        adds `module_edges` (an Alembic-tracked database, where
+        `StorageManager` deliberately never creates tables). Everything
+        touching the table checks this first, so an unmigrated database
+        keeps indexing exactly as before and only lacks the restart-proof
+        module structure -- logged once, never silent.
+        """
+        if sa_inspect(session.get_bind()).has_table("module_edges"):
+            return True
+        if not self._warned_module_edges_missing:
+            self._warned_module_edges_missing = True
+            logger.warning(
+                "Table 'module_edges' does not exist (the database has not been migrated): "
+                "module structure will not survive a restart until `alembic upgrade head` is run."
+            )
+        return False
+
+    def _persist_module_edges(
+        self, session, repo_id: int, files: list[str], edges: list[tuple[str, str]]
+    ) -> None:
+        """
+        Replaces this repository's `module_edges` rows with the complete
+        current snapshot -- on an incremental run that is the merged set, not
+        just the changed files'. One row per resolved edge, plus one row with
+        a NULL target for every file with no outgoing edge, so the node set
+        is stored (see `ModuleEdge`). A wholesale replace is correct and cheap
+        at file level, and is what makes re-indexing idempotent. Runs in the
+        caller's transaction.
+        """
+        if not self._module_edges_table_exists(session):
+            return
+        session.query(ModuleEdge).filter(ModuleEdge.repo_id == repo_id).delete(synchronize_session=False)
+        with_edges = {source for source, _ in edges}
+        for source_file, target_file in edges:
+            session.add(ModuleEdge(repo_id=repo_id, source_file=source_file, target_file=target_file))
+        for file_path in files:
+            if file_path not in with_edges:
+                session.add(ModuleEdge(repo_id=repo_id, source_file=file_path, target_file=None))
+
     def _persist_to_db(
         self,
         repo_name: str,
@@ -1369,6 +1426,7 @@ class IndexingEngine:
         chunk_embeddings: list[tuple[Symbol, CodeChunk, np.ndarray]] | None = None,
         is_incremental: bool = False,
         changed_symbol_keys: set[tuple[str, str]] | None = None,
+        module_snapshot: tuple[list[str], list[tuple[str, str]]] | None = None,
     ) -> dict[str, int]:
         """
         Persists repository hierarchy to the database.
@@ -1667,6 +1725,8 @@ class IndexingEngine:
             self._persist_call_graph_edges(
                 session, repo_record.id, is_incremental, changed_symbol_keys or set()
             )
+            if module_snapshot is not None:
+                self._persist_module_edges(session, repo_record.id, *module_snapshot)
 
             session.commit()
             return {
@@ -1855,6 +1915,7 @@ class IndexingEngine:
                 self.bm25_index.build()
 
             self._restore_call_graph(session, repo_record.id)
+            self._restore_module_graph(session, repo_record.id)
 
             return {
                 "repo_id": repo_record.id,
@@ -1864,6 +1925,32 @@ class IndexingEngine:
             }
         finally:
             session.close()
+
+    def _restore_module_graph(self, session, repo_id: int) -> None:
+        """
+        Rebuilds this repository's module-structure graph from its durable
+        `module_edges` rows (resolved edges plus a NULL-target row per file
+        without outgoing edges, so the node set comes from the same place),
+        so module structure works immediately after a restart.
+
+        Skipped -- the repository stays cold, exactly as before this
+        feature -- when the table does not exist yet OR the repository has
+        no rows (it has not been indexed since the table was added). A
+        partial graph built from anything else would show a confident
+        all-singletons structure for a repository that does have imports.
+        """
+        if repo_id in self._restored_module_graphs or not self._module_edges_table_exists(session):
+            return
+        rows = session.query(ModuleEdge.source_file, ModuleEdge.target_file).filter(
+            ModuleEdge.repo_id == repo_id
+        ).all()
+        if not rows:
+            return
+        files = {source for source, _ in rows} | {target for _, target in rows if target is not None}
+        self._restored_module_graphs[repo_id] = ModuleGraphBuilder.from_edges(
+            sorted(files),
+            [(source, target) for source, target in rows if target is not None],
+        )
 
     def _restore_call_graph(self, session, repo_id: int) -> None:
         """
@@ -2179,19 +2266,25 @@ class IndexingEngine:
         analysis itself.
 
         Computed fresh from the current in-memory snapshot on every
-        call -- no incremental-update machinery, no cross-call caching,
-        no persistence, per this milestone's explicit approved scope
-        ("compute module structure from the current repository
-        snapshot"). Returns an empty-graph `ModuleGraphBuilder` if this
-        repository has no parsed files cached yet (e.g. before its
-        first `index_directory()` call, or after a process restart --
-        `self.parse_results` does not survive one, matching
-        `self.call_graphs`'s own already-documented restart behavior).
+        call when this process has parse results for the repository --
+        no incremental-update machinery, no cross-call caching, per this
+        milestone's original approved scope. 2026-10-12 (user-approved,
+        CODEPULSE_FUTURE_CHANGES.md item 15): the resolved import edges
+        are now persisted (`module_edges`), so after a process restart --
+        when `self.parse_results` is empty -- the graph restored from
+        them at startup is returned instead of an empty one. Returns an
+        empty-graph `ModuleGraphBuilder` only when the repository has
+        neither (never indexed, or the database is not yet migrated to
+        `module_edges`).
         """
         prefix = f"{repo_id}::"
         repo_parsed_files = [
             cached for key, cached in self.parse_results.items() if key.startswith(prefix)
         ]
+        if not repo_parsed_files and repo_id in self._restored_module_graphs:
+            # No parse results in this process (a restart): use the graph
+            # restored from the durable `module_edges` rows.
+            return self._restored_module_graphs[repo_id]
         return ModuleGraphBuilder(repo_parsed_files)
 
     def analyze_references(self, symbol_name: str, file_path: str, repo_id: int) -> dict[str, Any]:

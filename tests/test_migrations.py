@@ -82,12 +82,13 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes Phase 7.2's
+        # Verify revision recorded (head now includes the module_edges migration
+        # on top of Phase 7.2's
         # api_key_repositories.role migration on top of Phase 4.1's
         # base_classes/relationship_type migration and the
         # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "b9014c049e33"
+        assert current_rev == "7c3e5a91d2f4"
 
         # Verify the isolation-fix column exists on call_edges
         call_edge_cols = {col["name"] for col in insp.get_columns("call_edges")}
@@ -242,12 +243,13 @@ def test_existing_database_stamping_scenario_2():
         # Stamp the existing database
         stamp_database(db_url=db_url, revision="head")
 
-        # Verify alembic_version is now recorded (head now includes Phase
+        # Verify alembic_version is now recorded (head now includes the
+        # module_edges migration on top of Phase
         # 7.2's api_key_repositories.role migration on top of Phase
         # 4.1's base_classes/relationship_type migration and the
         # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "b9014c049e33"
+        assert current_rev == "7c3e5a91d2f4"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
@@ -1084,6 +1086,85 @@ def test_phase_1_3_migration_preserves_data_and_adds_index_jobs_table():
             job_count = conn.execute(text("SELECT count(*) FROM index_jobs")).scalar()
             assert job_count == 1
 
+    finally:
+        if engine is not None:
+            engine.dispose()
+        if os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def test_module_edges_migration_preserves_data_creates_the_table_and_downgrades_cleanly():
+    """
+    Upgrading a database at the previous head (b9014c049e33, no module_edges
+    table) to 7c3e5a91d2f4:
+      1. existing rows in every other table are preserved untouched;
+      2. `module_edges` exists with the expected columns, the repo_id index,
+         the unique (repo_id, source_file, target_file) constraint, and a
+         foreign key to `repositories` that cascades on delete;
+      3. a downgrade removes exactly that table and nothing else.
+
+    Purely additive (it only creates a table), so there is no
+    pre-existing-duplicate-data failure mode to test.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        temp_db_path = f.name
+    if os.path.exists(temp_db_path):
+        os.remove(temp_db_path)
+    db_url = f"sqlite:///{temp_db_path.replace(os.sep, '/')}"
+    engine = None
+
+    try:
+        run_migrations(db_url=db_url, revision="b9014c049e33")
+        assert get_current_revision(db_url) == "b9014c049e33"
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            conn.execute(text(
+                "INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) "
+                "VALUES (1, 1, 'r', 'file:///r', 1, 1)"))
+            conn.execute(text(
+                "INSERT INTO files (id, repo_id, path, language, size_bytes, line_count, content_hash) "
+                "VALUES (1, 1, 'main.py', 'python', 42, 5, 'deadbeef')"))
+            conn.commit()
+        assert "module_edges" not in inspect(engine).get_table_names()
+
+        run_migrations(db_url=db_url, revision="head")
+        assert get_current_revision(db_url) == "7c3e5a91d2f4"
+
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM repositories")).scalar() == 1
+            assert conn.execute(text("SELECT count(*) FROM files")).scalar() == 1
+
+        insp = inspect(engine)
+        assert "module_edges" in insp.get_table_names()
+        assert {c["name"] for c in insp.get_columns("module_edges")} == {"id", "repo_id", "source_file", "target_file"}
+        assert "ix_module_edges_repo_id" in [i["name"] for i in insp.get_indexes("module_edges")]
+        assert any(
+            sorted(u["column_names"]) == ["repo_id", "source_file", "target_file"]
+            for u in insp.get_unique_constraints("module_edges")
+        )
+        fks = insp.get_foreign_keys("module_edges")
+        assert [(fk["referred_table"], fk["constrained_columns"]) for fk in fks] == [("repositories", ["repo_id"])]
+        assert fks[0]["options"].get("ondelete") == "CASCADE"
+
+        # Usable: insert, reject a duplicate, cascade on repository delete.
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            conn.execute(text("INSERT INTO module_edges (repo_id, source_file, target_file) VALUES (1, 'a.py', 'b.py')"))
+            conn.commit()
+            with pytest.raises(Exception):
+                conn.execute(text("INSERT INTO module_edges (repo_id, source_file, target_file) VALUES (1, 'a.py', 'b.py')"))
+            conn.rollback()
+            conn.execute(text("DELETE FROM repositories WHERE id = 1"))
+            conn.commit()
+            assert conn.execute(text("SELECT count(*) FROM module_edges")).scalar() == 0
+
+        downgrade_migrations(db_url=db_url, revision="b9014c049e33")
+        assert get_current_revision(db_url) == "b9014c049e33"
+        assert "module_edges" not in inspect(engine).get_table_names()
+        assert "api_key_repositories" in inspect(engine).get_table_names()
     finally:
         if engine is not None:
             engine.dispose()

@@ -185,6 +185,40 @@ class CallEdge(Base):
     confidence = Column(String(20), nullable=True)
 
 
+class ModuleEdge(Base):
+    """
+    The persisted file-level import graph of one repository, so a restarted
+    process can rebuild module structure without re-parsing -- the graph
+    used to exist only in `IndexingEngine.parse_results` (in memory), so
+    module structure was empty after every restart
+    (CODEPULSE_FUTURE_CHANGES.md item 15). Migration `7c3e5a91d2f4`.
+
+    One row per RESOLVED edge (`source_file` imports `target_file`, both
+    repository-local; an external or stdlib import never becomes an edge,
+    per `ModuleGraphBuilder`'s own rules). A file that has no resolved
+    imports gets one row with `target_file` NULL: the node set is stored
+    explicitly, so (a) isolated files are kept, (b) the restored graph has
+    exactly the files that were parsed (not whatever `files` rows exist,
+    which can include stale rows), and (c) "no rows for a repository"
+    reliably means "not indexed since this table existed" -- the repository
+    stays cold instead of showing a misleading all-singletons graph.
+
+    Rows are replaced wholesale for the repository on every index run (full
+    or incremental) from the complete merged parse set, so they are always
+    a coherent snapshot and re-indexing never duplicates them. `repo_id` is
+    NOT NULL and cascades on repository deletion.
+    """
+    __tablename__ = "module_edges"
+    __table_args__ = (
+        UniqueConstraint("repo_id", "source_file", "target_file", name="uq_module_edges_repo_source_target"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    repo_id = Column(Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_file = Column(Text, nullable=False)
+    target_file = Column(Text, nullable=True)
+
+
 class EmbeddingModel(Base):
     __tablename__ = "code_embeddings"
     __table_args__ = (

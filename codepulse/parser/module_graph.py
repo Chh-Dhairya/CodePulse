@@ -29,6 +29,14 @@ class ModuleGraphBuilder:
     A future one can, through `IndexingEngine.analyze_module_structure`,
     without duplicating any of this construction logic.
 
+    2026-10-12 (user-approved, CODEPULSE_FUTURE_CHANGES.md item 15): the
+    resolved file-to-file edges are now persisted (`module_edges`) and a
+    graph can be rebuilt from them with `from_edges`, so module structure
+    survives a restart. `snapshot` computes just the files and edges (no
+    clustering) for the index-time write; `from_edges` then produces a
+    graph identical, in every public structure, to one built from parse
+    results.
+
     Graph semantics (approved, roadmap §37 item 4.3 audit):
       - Nodes are every file this repository's parser actually parsed
         (`ImportResolver.files`), INCLUDING files with zero imports in
@@ -94,22 +102,80 @@ class ModuleGraphBuilder:
         self.adjacency: dict[str, set[str]] = {f: set() for f in self.files}
         self.reverse_adjacency: dict[str, set[str]] = {f: set() for f in self.files}
 
-        for file_path, res in self.resolver.files.items():
-            for imp in res.imports:
-                target = self.resolver.resolve_import_path(file_path, imp)
-                # `resolve_import_path` only ever returns a key already
-                # present in `self.resolver.files` -- the `in self.files`
-                # check is a defensive, explicit restatement of "only
-                # resolved, repository-local imports become edges," not
-                # a case this can actually fail today.
-                if target and target != file_path and target in self.resolver.files:
-                    self.adjacency[file_path].add(target)
-                    self.reverse_adjacency[target].add(file_path)
+        for file_path, target in self._resolve_edges(self.resolver):
+            self.adjacency[file_path].add(target)
+            self.reverse_adjacency[target].add(file_path)
 
         self.in_degree: dict[str, int] = {f: len(self.reverse_adjacency[f]) for f in self.files}
         self.out_degree: dict[str, int] = {f: len(self.adjacency[f]) for f in self.files}
 
         self.clusters: list[dict[str, Any]] = self._compute_clusters()
+
+    @staticmethod
+    def _resolve_edges(resolver: ImportResolver) -> list[tuple[str, str]]:
+        """
+        The single place import statements become file-to-file edges, shared
+        by a full build (`__init__`) and `snapshot` so the two can never
+        disagree about what an edge is.
+        """
+        edges: list[tuple[str, str]] = []
+        for file_path, res in resolver.files.items():
+            for imp in res.imports:
+                target = resolver.resolve_import_path(file_path, imp)
+                # `resolve_import_path` only ever returns a key already
+                # present in `resolver.files` -- the `in resolver.files`
+                # check is a defensive, explicit restatement of "only
+                # resolved, repository-local imports become edges," not
+                # a case this can actually fail today.
+                if target and target != file_path and target in resolver.files:
+                    edges.append((file_path, target))
+        return edges
+
+    @classmethod
+    def snapshot(
+        cls, parse_results: dict[str, FileParseResult] | list[FileParseResult]
+    ) -> tuple[list[str], list[tuple[str, str]]]:
+        """
+        `(files, edges)` for these parse results: every parsed file
+        (sorted, isolated ones included) and the distinct, sorted
+        `(source_file, target_file)` resolved edges -- WITHOUT computing
+        clusters/degrees. This is what the indexer persists on every run,
+        so it must stay cheap; `from_edges` accepts exactly this pair.
+        """
+        resolver = ImportResolver(parse_results)
+        return sorted(resolver.files.keys()), sorted(set(cls._resolve_edges(resolver)))
+
+    @property
+    def edges(self) -> list[tuple[str, str]]:
+        """Sorted `(source_file, target_file)` pairs; the exact set `from_edges` accepts."""
+        return sorted((src, tgt) for src, targets in self.adjacency.items() for tgt in targets)
+
+    @classmethod
+    def from_edges(cls, files: list[str], edges: list[tuple[str, str]]) -> "ModuleGraphBuilder":
+        """
+        Rebuilds the graph from the persisted node list (every parsed file,
+        including isolated ones) and resolved edges, with no parse results.
+        Every public structure -- adjacency, degrees, clusters, rankings --
+        is identical to a graph built from parse results with the same
+        files and edges (clustering is deterministic for a given graph and
+        seed). An edge naming a file that is not in `files` is ignored,
+        never allowed to invent a node.
+
+        `resolver` is empty on a restored graph; nothing public reads it.
+        """
+        graph = cls([])
+        graph.files = sorted(set(files))
+        known = set(graph.files)
+        graph.adjacency = {f: set() for f in graph.files}
+        graph.reverse_adjacency = {f: set() for f in graph.files}
+        for src, tgt in edges:
+            if src in known and tgt in known and src != tgt:
+                graph.adjacency[src].add(tgt)
+                graph.reverse_adjacency[tgt].add(src)
+        graph.in_degree = {f: len(graph.reverse_adjacency[f]) for f in graph.files}
+        graph.out_degree = {f: len(graph.adjacency[f]) for f in graph.files}
+        graph.clusters = graph._compute_clusters()
+        return graph
 
     def _compute_clusters(self) -> list[dict[str, Any]]:
         graph = nx.Graph()

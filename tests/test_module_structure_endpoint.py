@@ -139,14 +139,24 @@ def test_get_repository_modules_rejected_without_any_key(tmp_path, shared_embedd
     assert response.status_code == 401
 
 
-def test_get_repository_modules_returns_empty_graph_for_a_cold_cache(tmp_path, shared_embedder, monkeypatch):
-    """Restart-like behavior: a repository this process has no cached
-    parse_results for yet must degrade to an empty graph, never a 500."""
+def test_get_repository_modules_survives_a_restart(tmp_path, shared_embedder, monkeypatch):
+    """Restart behavior. 2026-10-12 (user-approved, FUTURE_CHANGES item 15):
+    this test used to assert that a fresh engine on the same database
+    returned an EMPTY graph (the in-memory parse cache did not survive a
+    restart). The resolved import edges are now persisted (`module_edges`),
+    so a restarted process must return the SAME structure it returned
+    before; the old empty-graph assertion is kept below for the case that
+    is still genuinely cold (a repository this database has never indexed)."""
     engine, result = _index_module_repo(tmp_path, "repo_modules_cold", shared_embedder, "modules_cold.db")
     repo_id = result["repository_id"]
+    monkeypatch.setattr(app_module, "storage_manager", engine.storage)
+    monkeypatch.setattr(app_module, "indexing_engine", engine)
+    before = TestClient(app).get(
+        f"/v1/repositories/{repo_id}/modules", headers=make_api_key_headers(engine.storage, repository_ids=[repo_id])
+    ).json()
+    assert before["clusters"], "fixture sanity"
 
-    # A key scoped to a repo_id that this fresh engine instance has never
-    # parsed -- simulating a restart without actually restarting.
+    engine.storage.engine.dispose()
     fresh_engine = _new_engine(_db_url(tmp_path, "modules_cold.db"), shared_embedder)
     monkeypatch.setattr(app_module, "storage_manager", fresh_engine.storage)
     monkeypatch.setattr(app_module, "indexing_engine", fresh_engine)
@@ -155,8 +165,30 @@ def test_get_repository_modules_returns_empty_graph_for_a_cold_cache(tmp_path, s
 
     response = client.get(f"/v1/repositories/{repo_id}/modules", headers=headers)
     assert response.status_code == 200
-    body = response.json()
-    assert body == {
+    assert response.json() == before
+
+
+def test_get_repository_modules_returns_empty_graph_for_a_repository_never_indexed(tmp_path, shared_embedder, monkeypatch):
+    """A repository this database has no files for degrades to an empty graph, never a 500."""
+    from codepulse.storage.db import RepositoryModel
+
+    engine = _new_engine(_db_url(tmp_path, "modules_never.db"), shared_embedder)
+    session = engine.storage.get_session()
+    try:
+        repo = RepositoryModel(name="never_indexed", url="file:///never/indexed")
+        session.add(repo)
+        session.commit()
+        repo_id = repo.id
+    finally:
+        session.close()
+    monkeypatch.setattr(app_module, "storage_manager", engine.storage)
+    monkeypatch.setattr(app_module, "indexing_engine", engine)
+    client = TestClient(app)
+    headers = make_api_key_headers(engine.storage, repository_ids=[repo_id])
+
+    response = client.get(f"/v1/repositories/{repo_id}/modules", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {
         "repository_id": repo_id,
         "clusters": [],
         "ranked_by_inbound": [],

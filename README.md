@@ -90,6 +90,16 @@ A separate extension (CodeLens, hovers, impact tree, MCP registration) lives in 
 
 Precedence: CLI flags > `CODEPULSE_*` environment variables > `codepulse.toml` > built-in defaults. Common settings are `db_url`, `embedding_model`, `embedding_device`, `ingestion_allowed_roots`, and the `rate_limit_*` options. See `codepulse/config.py` for the full list.
 
+## Upgrading an existing database
+
+A database CodePulse created itself on first run has no migration history and picks up new tables automatically. A database that Alembic manages (one that has been migrated before) needs this once after updating, from the repository root:
+
+```bash
+alembic upgrade head
+```
+
+The database URL comes from `CODEPULSE_DB_URL`, a `codepulse.toml` in that directory, or the default `sqlite:///codepulse.db`. Back it up first (see `docs/BACKUP_RESTORE.md`). Until you do, CodePulse keeps working; the only effect is that module structure is not restored after a restart (a warning is logged), and it returns once you have upgraded and re-indexed the repository.
+
 ## Development
 
 ```bash
