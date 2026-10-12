@@ -72,6 +72,9 @@ class IncrementalPlan:
     reason: str = ""
 
 # Files/folders to ignore during indexing
+# How many relpaths `_purge_stale_entries` binds into one `IN (...)` lookup.
+_PURGE_LOOKUP_BATCH = 500
+
 IGNORE_DIRS = {
     ".git",
     ".venv",
@@ -432,12 +435,18 @@ class IndexingEngine:
 
         session = self.storage.get_session()
         try:
-            file_rows = (
-                session.query(FileModel)
-                .filter(FileModel.repo_id == repo_id)
-                .filter(FileModel.path.in_(relpaths))
-                .all()
-            )
+            # Looked up in batches: a single `IN (...)` binding every path
+            # overflows SQLite's variable limit when a large directory
+            # becomes ignored or is deleted (tens of thousands of paths).
+            file_rows: list[FileModel] = []
+            for start in range(0, len(relpaths), _PURGE_LOOKUP_BATCH):
+                batch = relpaths[start:start + _PURGE_LOOKUP_BATCH]
+                file_rows.extend(
+                    session.query(FileModel)
+                    .filter(FileModel.repo_id == repo_id)
+                    .filter(FileModel.path.in_(batch))
+                    .all()
+                )
             bm25_doc_ids: list[str] = []
             vector_doc_ids: list[str] = []
             removed_symbol_keys: set[tuple[str, str]] = set()
@@ -465,6 +474,51 @@ class IndexingEngine:
             self.parse_results.pop(f"{repo_id}::{relpath}", None)
 
         return removed_symbol_keys
+
+    def _purge_files_missing_from_full_run(
+        self, repo_id: int, parsed_relpaths: set[str], failed_relpaths: set[str]
+    ) -> set[tuple[str, str]]:
+        """
+        Purges (via `_purge_stale_entries`, so database rows, the keyword and
+        vector indexes, the symbol maps and the parse cache all go together)
+        every stored file of this repository that a FULL run did not parse:
+        deleted, newly ignored, no longer supported, or now over the size cap.
+
+        Two deliberate exceptions:
+          - `failed_relpaths`: a file whose parse raised this run keeps its
+            previous rows; the next successful parse replaces them.
+          - A run that parsed NO files at all purges nothing. An empty or
+            unmounted directory (or a checkout in progress) must never be
+            read as "every file was deleted" and wipe the index; the cost is
+            that a repository genuinely emptied of source files keeps its
+            old rows, which is the behavior from before this purge existed.
+
+        Returns the `(file, symbol)` keys removed, like `_purge_stale_entries`.
+        """
+        if not parsed_relpaths:
+            session = self.storage.get_session()
+            try:
+                stored = session.query(FileModel.id).filter(FileModel.repo_id == repo_id).count()
+            finally:
+                session.close()
+            if stored:
+                logger.warning(
+                    "Full run for repo_id=%s parsed no files but %d are stored: not purging "
+                    "(an empty or unavailable directory must not wipe the index)",
+                    repo_id, stored,
+                )
+            return set()
+
+        session = self.storage.get_session()
+        try:
+            stored_paths = {path for (path,) in session.query(FileModel.path).filter(FileModel.repo_id == repo_id)}
+        finally:
+            session.close()
+        stale = sorted(stored_paths - parsed_relpaths - failed_relpaths)
+        if not stale:
+            return set()
+        logger.info("Full run for repo_id=%s: purging %d stored file(s) no longer indexable", repo_id, len(stale))
+        return self._purge_stale_entries(repo_id, stale)
 
     def _rekey_renamed_files(self, repo_id: int, renamed_pairs: list[tuple[str, str]]) -> set[tuple[str, str]]:
         """
@@ -879,6 +933,10 @@ class IndexingEngine:
         elif incremental_plan.reason:
             logger.info("Full re-index for repo_id=%s: %s", repo_id, incremental_plan.reason)
 
+        # Files whose parse RAISED this run: their previous rows are kept (see
+        # the full-run purge below) -- a transient failure must not delete
+        # previously good data.
+        failed_relpaths: set[str] = set()
         parsed_files: list[FileParseResult] = []
         all_symbols: list[Symbol] = []
         all_chunks: list[CodeChunk] = []
@@ -970,7 +1028,19 @@ class IndexingEngine:
                     all_chunks.extend(chunks)
 
             except Exception as e:
+                failed_relpaths.add(rel_path)
                 logger.warning("Error parsing file '%s': %s", rel_path, e)
+
+        # A FULL run's parsed set is the repository's complete current
+        # indexable content, so any stored file outside it is stale. Until
+        # 2026-10-12 only the incremental path purged (and a full run is what
+        # non-git repositories, first runs and every post-restart run get),
+        # so deleted/ignored files lingered in the database, the keyword
+        # index after a restart and the restored symbol map.
+        if not incremental_plan.is_incremental:
+            removed_symbol_keys |= self._purge_files_missing_from_full_run(
+                repo_id, {pf.file_path for pf in parsed_files}, failed_relpaths
+            )
 
         logger.info(
             "Parsed %d files. Extracted %d symbols and %d semantic chunks.",
