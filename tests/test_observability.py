@@ -207,6 +207,22 @@ def test_a_404_response_increments_api_errors_total(client, isolated_app):
     assert after == before + 1
 
 
+def test_unmatched_paths_share_one_metric_label_instead_of_one_series_per_url(client, isolated_app):
+    """Routing-level 404s are now reshaped by the error handler (2026-10-02
+    audit, finding F) and therefore counted. Labelling them by raw URL
+    would let anything probing random paths create an unbounded number of
+    Prometheus series, so they all share one fixed label."""
+    before = _metric_value("api_errors_total", {"endpoint": "unmatched", "status_code": "404"})
+    for path in ("/wp-admin/setup.php", "/.env", "/v1/nope-1", "/v1/nope-2"):
+        assert client.get(path).status_code == 404
+    after = _metric_value("api_errors_total", {"endpoint": "unmatched", "status_code": "404"})
+    assert after == before + 4
+
+    exposition = client.get("/metrics").text
+    for raw in ("/wp-admin/setup.php", "/.env", "/v1/nope-1", "/v1/nope-2"):
+        assert f'endpoint="{raw}"' not in exposition, f"{raw} must not become its own metric series"
+
+
 # --- Structured logging (structlog) ----------------------------------------
 
 def test_configure_logging_is_idempotent():

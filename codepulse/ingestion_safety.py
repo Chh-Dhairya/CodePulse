@@ -107,18 +107,25 @@ def validate_local_path(path: str, allowed_roots: list[str]) -> str:
     """
     resolved = str(Path(path).resolve())
 
-    if not allowed_roots:
-        return resolved
+    if allowed_roots:
+        for root in allowed_roots:
+            resolved_root = str(Path(root).resolve())
+            if resolved == resolved_root or resolved.startswith(resolved_root + os.sep):
+                break
+        else:
+            raise IngestionSafetyError(
+                f"Path '{path}' resolves to '{resolved}', which is outside every "
+                f"configured ingestion_allowed_roots entry"
+            )
 
-    for root in allowed_roots:
-        resolved_root = str(Path(root).resolve())
-        if resolved == resolved_root or resolved.startswith(resolved_root + os.sep):
-            return resolved
+    # Checked AFTER the allow-list on purpose: reporting "does not exist"
+    # for a path outside the allowed roots would let a caller probe which
+    # paths exist outside them. A nonexistent path used to be accepted and
+    # silently created an empty phantom repository (2026-10-02 audit).
+    if not os.path.isdir(resolved):
+        raise IngestionSafetyError(f"Path '{path}' is not an existing directory")
 
-    raise IngestionSafetyError(
-        f"Path '{path}' resolves to '{resolved}', which is outside every "
-        f"configured ingestion_allowed_roots entry"
-    )
+    return resolved
 
 
 def validate_git_url(url: str) -> None:

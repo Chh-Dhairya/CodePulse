@@ -59,6 +59,29 @@ def _make_repo_dir(tmp_path, name: str, files: dict[str, str] | None = None):
     return repo_dir
 
 
+# --- Local ingestion: the path must be a real directory ----------------------
+# Found by the 2026-10-02 audit: a nonexistent path used to return 202 and
+# create an empty phantom repository row.
+
+def test_nonexistent_local_path_is_rejected_and_creates_no_repository(client, isolated_app, tmp_path):
+    from codepulse.storage.db import RepositoryModel
+
+    headers = make_api_key_headers(isolated_app)
+    response = client.post(
+        "/v1/repositories/index",
+        json={"source": "local", "url": str(tmp_path / "does_not_exist")},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    assert "existing directory" in response.json()["error"]["message"]
+
+    session = isolated_app.get_session()
+    try:
+        assert session.query(RepositoryModel).count() == 0, "a rejected request must not leave a phantom repository behind"
+    finally:
+        session.close()
+
+
 # --- Git-URL ingestion: SSRF check + honest 501 ------------------------------
 
 def test_git_source_with_ssrf_unsafe_host_is_rejected(client, isolated_app):

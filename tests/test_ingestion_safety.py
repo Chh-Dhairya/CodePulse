@@ -33,6 +33,40 @@ def test_unrestricted_allow_list_permits_any_real_path(tmp_path):
     assert resolved == str(target.resolve())
 
 
+# --- validate_local_path: the path must be a real directory --------------------
+# Found by the 2026-10-02 audit: a nonexistent path used to be accepted and
+# silently created an empty "phantom" repository.
+
+def test_nonexistent_path_is_rejected_even_when_unrestricted(tmp_path):
+    with pytest.raises(IngestionSafetyError, match="not an existing directory"):
+        validate_local_path(str(tmp_path / "does_not_exist"), allowed_roots=[])
+
+
+def test_a_file_is_rejected_because_a_repository_must_be_a_directory(tmp_path):
+    a_file = tmp_path / "file.py"
+    a_file.write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(IngestionSafetyError, match="not an existing directory"):
+        validate_local_path(str(a_file), allowed_roots=[])
+
+
+def test_nonexistent_path_inside_an_allowed_root_is_rejected(tmp_path):
+    root = tmp_path / "allowed"
+    root.mkdir()
+    with pytest.raises(IngestionSafetyError, match="not an existing directory"):
+        validate_local_path(str(root / "missing"), allowed_roots=[str(root)])
+
+
+def test_nonexistent_path_outside_the_allow_list_reports_the_allow_list_not_existence(tmp_path):
+    """The allow-list check must come first, so a caller can't use the error
+    message to probe whether paths OUTSIDE the allowed roots exist."""
+    root = tmp_path / "allowed"
+    root.mkdir()
+    with pytest.raises(IngestionSafetyError) as exc:
+        validate_local_path(str(tmp_path / "elsewhere" / "missing"), allowed_roots=[str(root)])
+    assert "outside" in str(exc.value)
+    assert "existing directory" not in str(exc.value)
+
+
 def test_path_inside_an_allowed_root_is_permitted(tmp_path):
     root = tmp_path / "allowed"
     root.mkdir()

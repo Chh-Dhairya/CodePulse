@@ -297,6 +297,48 @@ def test_resolve_mcp_api_key_treats_an_empty_string_cli_value_as_unset():
     assert cli.resolve_mcp_api_key("", {"CODEPULSE_MCP_API_KEY": "env-key"}) == "env-key"
 
 
+# --- main(): repository-path validation ------------------------------------
+# Found by the 2026-10-02 audit: `callers /no/such/path foo` exited 0 with
+# "0 found" and left an empty phantom repository (and, if needed, a new
+# database file) behind. Exercised through main() (not cmd_* directly)
+# because the check lives in main()'s dispatch.
+
+@pytest.mark.parametrize("command", ["index", "update", "status", "modules"])
+def test_main_rejects_a_nonexistent_repository_path_without_creating_a_database(
+    tmp_path, monkeypatch, capsys, command
+):
+    db_file = tmp_path / "should_not_be_created.db"
+    missing = tmp_path / "no_such_repo"
+    monkeypatch.setattr(
+        "sys.argv", ["codepulse", "--db-url", _db_url(tmp_path, db_file.name), command, str(missing)]
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    assert not db_file.exists(), "validating the path must happen BEFORE any database is created"
+    assert "not an existing directory" in capsys.readouterr().err
+
+
+def test_main_symbol_style_command_with_json_reports_a_machine_readable_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv",
+        ["codepulse", "--db-url", _db_url(tmp_path, "x.db"), "callers", str(tmp_path / "nope"), "foo", "--json"],
+    )
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
+    body = json.loads(capsys.readouterr().out)
+    assert body["error"] == "path_not_found"
+
+
+def test_main_does_not_require_the_path_to_exist_for_init(tmp_path, monkeypatch):
+    """`init` creates its target directory, so it must stay exempt."""
+    target = tmp_path / "brand_new_dir"
+    monkeypatch.setattr("sys.argv", ["codepulse", "init", str(target)])
+    cli.main()
+    assert (target / "codepulse.toml").exists()
+
+
 # --- _display_db_path (main()'s "Using database: ..." diagnostic) ---------
 # Not a roadmap sprint item -- db_url defaults to a CWD-relative
 # "sqlite:///codepulse.db" with no prior feedback about which absolute

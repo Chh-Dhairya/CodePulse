@@ -32,6 +32,11 @@ if sys.platform == "win32":
 console = Console(safe_box=True)
 _stderr_console = Console(safe_box=True, stderr=True)
 
+# Subcommands whose positional `path` is a repository directory that must exist.
+_REPOSITORY_PATH_COMMANDS = frozenset(
+    {"index", "update", "search", "impact", "symbol", "refs", "callers", "callees", "similar", "status", "modules"}
+)
+
 
 def _display_db_path(db_url: str) -> str:
     """
@@ -773,6 +778,21 @@ def main() -> None:
 
     from codepulse.config import get_settings
     settings = get_settings(config_file=args.config, cli_overrides=cli_overrides, reload=True)
+
+    # Backend-hardening addition (not a roadmap sprint item), found by the
+    # 2026-10-02 audit: every command below that takes a repository path
+    # used to accept a nonexistent one, exit 0 with "0 found", and leave
+    # an empty phantom repository (and possibly a brand-new database file)
+    # behind. Validated here, BEFORE the database diagnostic and before
+    # anything can create a database. `parse` (a file), `init` (creates its
+    # directory), `doctor` (optional) and `serve` (no path) are exempt.
+    if args.command in _REPOSITORY_PATH_COMMANDS and not os.path.isdir(args.path):
+        message = f"Path '{args.path}' is not an existing directory"
+        if getattr(args, "json", False):
+            _print_json({"error": "path_not_found", "message": message})
+        else:
+            _stderr_console.print(f"[bold red]Error:[/bold red] {message}")
+        sys.exit(1)
 
     # Backend-hardening addition (not a roadmap sprint item): db_url
     # defaults to "sqlite:///codepulse.db", resolved relative to the

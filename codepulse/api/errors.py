@@ -73,9 +73,17 @@ import logging
 from http import HTTPStatus
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+# Registered on Starlette's BASE HTTPException (not `fastapi.HTTPException`,
+# which is a subclass): Starlette's own router raises the base class for an
+# unmatched path (404) or wrong method (405), so a handler registered only on
+# the subclass never matched those and they bypassed the §21 envelope
+# (2026-10-02 audit). Exception handlers are looked up through the MRO, so
+# this ALSO still catches every `fastapi.HTTPException` raised by the routes.
+from starlette.exceptions import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +140,12 @@ def install_error_handlers(app: FastAPI) -> None:
         retry_after = exc.headers.get("Retry-After") if exc.headers else None
         if retry_after is not None:
             details["retry_after_seconds"] = int(retry_after)
-        _record_api_error(request, exc.status_code)
+        # A router-level 404/405 has no matched endpoint in scope. Counting
+        # those under the raw URL would let anything probing random paths
+        # mint an unbounded number of Prometheus series, so they share one
+        # fixed label instead.
+        endpoint = request.url.path if "endpoint" in request.scope else "unmatched"
+        _record_api_error(request, exc.status_code, endpoint=endpoint)
         return error_json_response(exc.status_code, str(exc.detail), details, headers=exc.headers)
 
     @app.exception_handler(RequestValidationError)
@@ -153,7 +166,7 @@ def install_error_handlers(app: FastAPI) -> None:
         return error_json_response(HTTPStatus.INTERNAL_SERVER_ERROR, "Internal server error")
 
 
-def _record_api_error(request: Request, status_code: int) -> None:
+def _record_api_error(request: Request, status_code: int, endpoint: str | None = None) -> None:
     """Phase 7.4 (roadmap §37 item 7.4; §18: "api_errors_total{endpoint,status_code}") -- one call site, reused by every handler above and the rate-limit middleware (codepulse/api/app.py)."""
     from codepulse.observability import api_errors_total
-    api_errors_total.labels(endpoint=request.url.path, status_code=str(int(status_code))).inc()
+    api_errors_total.labels(endpoint=endpoint or request.url.path, status_code=str(int(status_code))).inc()

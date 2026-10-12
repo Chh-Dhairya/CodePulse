@@ -127,6 +127,28 @@ def test_404_not_found_uses_the_structured_envelope(client, isolated_app):
 
 # --- 409 (advisory concurrency lock) --------------------------------------
 
+def test_unknown_route_uses_the_structured_envelope(client, isolated_app):
+    """Found by the 2026-10-02 audit: Starlette's router raises its BASE
+    HTTPException for an unmatched path, which the handler registered on
+    `fastapi.HTTPException` (a subclass) never matched, so these returned
+    a bare {"detail": ...} instead of the §21 envelope."""
+    response = client.get("/v1/this-route-does-not-exist")
+    assert response.status_code == 404
+    body = response.json()
+    assert set(body) == {"error"}, f"expected only the §21 envelope, got {body}"
+    assert body["error"]["code"] == "not_found"
+    assert body["error"]["details"] == {}
+
+
+def test_wrong_method_uses_the_structured_envelope_and_keeps_the_allow_header(client, isolated_app):
+    response = client.delete("/v1/search")
+    assert response.status_code == 405
+    body = response.json()
+    assert set(body) == {"error"}
+    assert body["error"]["code"] == "method_not_allowed"
+    assert "POST" in response.headers.get("allow", ""), "the Allow header is part of the 405 contract and must survive reshaping"
+
+
 def test_409_conflict_uses_the_structured_envelope(client, isolated_app, tmp_path):
     from codepulse.jobs import create_job
     from codepulse.storage.db import RepositoryModel
