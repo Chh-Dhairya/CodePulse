@@ -3,6 +3,7 @@ name = "codepulse"
 version = "0.1.0"
 description = "Semantic Codebase Intelligence Engine"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.11,<3.13"
 dependencies = [
     # API & Web Framework
@@ -131,6 +132,12 @@ build-backend = "setuptools.build_meta"
 # `alembic/` is this project's OWN migration script directory (run via
 # `alembic upgrade head`, never imported as a library), not a package
 # meant to be installed.
+# Installs a real `codepulse` command (previously only `python -m
+# codepulse.cli` worked, so e.g. the VS Code extension's default
+# `codepulse.serverCommand` of "codepulse" could never launch a server).
+[project.scripts]
+codepulse = "codepulse.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["codepulse*"]
 

@@ -1,0 +1,9 @@
+# Store text files with LF in the repository regardless of the committer's
+# OS/autocrlf setting (the index was already 100% LF; this keeps it that way
+# and removes the per-file "LF will be replaced by CRLF" warnings on Windows).
+* text=auto
+
+# Never touch binary assets.
+*.png binary
+*.zip binary
+*.db binary
