@@ -239,26 +239,31 @@ def test_restart_restores_the_same_module_structure_without_a_reindex(tmp_path, 
 
 
 def test_the_restored_graph_has_exactly_the_parsed_files_not_stale_files_rows(tmp_path, shared_embedder):
-    """A full re-index never deletes the `files` rows of files that no longer exist
-    (a separate, older limitation). The restored node set must come from the stored
-    snapshot, not from those rows, or a deleted file would reappear as a cluster."""
+    """The restored node set comes from the stored snapshot, not from `files` rows.
+
+    A full re-index used to leave the `files` rows of deleted files behind
+    (FUTURE_CHANGES item 16, now fixed), which is what this test was first
+    written around. That path no longer produces stale rows, so one is planted
+    directly: a `files` row for a file the snapshot never contained must not
+    reappear as a cluster after a restart."""
     repo = _make_repo(tmp_path, "r6b")
     db_url = _db_url(tmp_path, "stale_rows.db")
     engine1 = _new_engine(db_url, shared_embedder)
     repo_id = engine1.index_directory(str(repo), repo_name="r6b", repo_url=str(repo))["repository_id"]
-    (repo / "lonely.py").unlink()
-    engine1.index_directory(str(repo), repo_name="r6b", repo_url=str(repo))  # not a git repo -> full run
     session = engine1.storage.get_session()
     try:
-        stale = [f.path for f in session.query(FileModel).filter(FileModel.repo_id == repo_id)]
+        session.add(FileModel(
+            repo_id=repo_id, path="ghost.py", language="python",
+            size_bytes=1, line_count=1, content_hash="0" * 64,
+        ))
+        session.commit()
     finally:
         session.close()
-    assert "lonely.py" in stale, "fixture sanity: the stale files row this test is about"
 
     engine2 = _restart(engine1, db_url, shared_embedder)
 
-    assert "lonely.py" not in engine2.analyze_module_structure(repo_id).files
-    assert engine2.analyze_module_structure(repo_id).files == sorted(set(FILES) - {"lonely.py"})
+    assert "ghost.py" not in engine2.analyze_module_structure(repo_id).files
+    assert engine2.analyze_module_structure(repo_id).files == sorted(FILES)
 
 
 def test_a_repository_with_no_stored_rows_stays_cold_instead_of_showing_singleton_clusters(tmp_path, shared_embedder):
