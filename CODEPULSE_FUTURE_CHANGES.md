@@ -38,18 +38,18 @@ Already flagged as its own tracked follow-up task (`task_de0daaea`, spawned mid-
 
 ## Items 3-9: found by the 2026-10-02 resumption audit
 
-Full evidence, root causes and verification are in `CODEPULSE_PROGRESS.md` ("Audit 2026-10-02"). Each was reproduced live; none is fixed. Listed in suggested priority order, not finding-letter order.
+Full evidence, root causes and verification are in `CODEPULSE_PROGRESS.md` ("Audit 2026-10-02"). Each was reproduced live. Items 3-6 were fixed on 2026-10-12; 7-9 and 10-12 are open. Listed in suggested priority order, not finding-letter order.
 
-### 3. No `codepulse` executable (audit finding E) — Medium
+### 3. No `codepulse` executable (audit finding E) — Medium — **RESOLVED 2026-10-12**
 `pyproject.toml` has no `[project.scripts]`, so only `python -m codepulse.cli` works. The VS Code extension's default `codepulse.serverCommand` is `codepulse`, which therefore fails out of the box (the manual had to tell users to change it). **Fix sketch**: add `[project.scripts] codepulse = "codepulse.cli:main"`, `pip install -e .`, verify `codepulse --help` and the extension's default launch. Smallest change with the largest "works first time" payoff.
 
-### 4. Nonexistent local paths are accepted and create phantom repositories (finding A) — Medium
+### 4. Nonexistent local paths are accepted and create phantom repositories (finding A) — Medium — **RESOLVED 2026-10-12**
 `python -m codepulse.cli callers /no/such/path foo` exits 0 with "0 found", and `POST /v1/repositories/index` with a bogus path returns `202` and a job that "succeeds" with 0 files — both leave an empty repository row. The real `codepulse.db` contained one from the manual's literal placeholder command (removed 2026-10-02 at the user's instruction; the bug itself is still open). **Fix sketch**: in `ingestion_safety.validate_local_path` (and the CLI's path handling) require `Path(...).is_dir()`; REST → `400` with a clear message, CLI → error + non-zero exit. Add tests for both. Interacts with item 2 (path normalization): do them together.
 
-### 5. README is inaccurate and has no usage section (finding B) — Medium (docs)
+### 5. README is inaccurate and has no usage section (finding B) — Medium (docs) — **RESOLVED 2026-10-12** (README rewritten; a `codepulse keys create` command is still a possible follow-up)
 Claims `pgvector`, Redis Streams and Docker prerequisites; none exist (actual stack: SQLite + sqlite-vec + Tantivy, in-process, no Docker). No instructions for the CLI, `serve`, or bootstrapping the first API key (which currently requires a Python snippet because the REST key endpoint needs an existing admin key). **Fix sketch**: rewrite to the real architecture; add a short "first run" section; consider a `codepulse keys create` CLI command so bootstrapping isn't a Python one-liner.
 
-### 6. Routing-level 404/405 skip the structured error envelope (finding F) — Low
+### 6. Routing-level 404/405 skip the structured error envelope (finding F) — Low — **RESOLVED 2026-10-12**
 Unknown route → `{"detail":"Not Found"}`, wrong method → `{"detail":"Method Not Allowed"}`, while every application-raised error uses the §21 `{"error":{...}}` envelope. Cause: `api/errors.py:129` registers its handler on `fastapi.HTTPException`, but Starlette's router raises the base `starlette.exceptions.HTTPException` (fastapi's is a subclass, so the handler never matches). **Fix sketch**: register the handler on `starlette.exceptions.HTTPException`; add a test for an unmatched route and a wrong method.
 
 ### 7. Default rate limit vs. the VS Code extension (finding D) — Low-Medium
@@ -60,6 +60,15 @@ Any DB created by the first CLI/`serve` run goes through `create_all()` with no 
 
 ### 9. SSRF check rejects NAT64 addresses (finding G) — Low, latent
 `validate_git_url` treats `64:ff9b::/96` (DNS64-synthesized) as reserved, so on an IPv6-only/DNS64 network every public git host (github.com → `64:ff9b::14cf:4952`) is refused as an SSRF risk. No current impact (git ingestion returns 501 anyway). **Fix sketch** when git cloning is implemented: extract the embedded IPv4 from NAT64 addresses and validate that instead.
+
+### 10. Built wheel is missing `alembic.ini` and the migrations (finding K) — Medium (packaging)
+`migrations.get_alembic_config` resolves `alembic.ini` and `alembic/` relative to the source tree, so a non-editable `pip install` (or a built wheel) ships without them and any migration call fails. Editable installs work, which is why this was never hit. **Fix sketch**: ship the migrations inside the package (or `package-data`) and resolve them via `importlib.resources`. Pairs naturally with item 8 (stamping/migrating fresh databases).
+
+### 11. Lint and type checks are declared but never run (finding L) — Low (hygiene)
+`ruff` and `mypy` are dev dependencies, yet neither runs in CI. Current counts: ruff 124, mypy 118, mostly noise (FastAPI `Depends()` default args, SQLAlchemy typing). Real minors: ~16 unused imports, ~16 blind `except Exception`, 7 `datetime.utcnow()` uses; five subpackages have no `__init__.py`. **Fix sketch**: configure ruff to ignore the framework noise, fix the real minors, then add ruff to CI. Do it as one dedicated cleanup milestone, not opportunistically.
+
+### 12. `api_errors_total` is labelled by raw path for matched routes (finding N) — Low
+Fix F collapsed unmatched paths into `endpoint="unmatched"`, but matched routes still use `request.url.path`, so `/v1/symbols/{id}` creates one Prometheus series per id. **Fix sketch**: label by the route template (`request.scope["route"].path`) in `_record_api_error`, and update `test_a_404_response_increments_api_errors_total`, which currently asserts the concrete path.
 
 ### Recorded, not necessarily defects
 - **403 vs 404 existence oracle (finding H)**: a key not scoped to a repository gets `403` for an existing symbol id and `404` for a nonexistent one; ids are sequential. A common tradeoff; decide deliberately whether to return `404` for both.
