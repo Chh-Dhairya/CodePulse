@@ -213,7 +213,7 @@ def test_repeated_reindex_is_idempotent_and_identifiers_stay_stable(tmp_path, sh
 
 # --- 2. Restart restores durable (semantic + lexical) state, not the call graph
 
-def test_restart_restores_semantic_lexical_and_call_graph_state_but_not_symbols_by_id(tmp_path, shared_embedder):
+def test_restart_restores_semantic_lexical_call_graph_and_symbol_map_state(tmp_path, shared_embedder):
     """
     Backend-hardening addition (not a roadmap sprint item) changed this
     test's own expected behavior, deliberately: `bm25_index` used to be
@@ -230,7 +230,10 @@ def test_restart_restores_semantic_lexical_and_call_graph_state_but_not_symbols_
     encoded that limitation and was changed deliberately, not weakened:
     the graph must now be present AND answer the same as before the
     restart (see tests/test_call_graph_restart_restore.py for the full
-    equivalence checks). `symbols_by_id` remains NOT durable, unchanged.
+    equivalence checks). The in-memory symbol map (`symbols_by_id`) is
+    restored too, from the same durable symbol rows (see
+    tests/test_symbol_map_restart_restore.py): without it the graph
+    component of hybrid ranking vanished after a restart.
     """
     repo_path = _make_repo_dir(
         tmp_path,
@@ -266,13 +269,11 @@ def test_restart_restores_semantic_lexical_and_call_graph_state_but_not_symbols_
     assert len(keyword_results) >= 1, "keyword search must work immediately after restart, no re-index required"
     assert any(r.symbol_name == "greet" for r in keyword_results)
 
-    # The call graph IS restored (from the durable call_edges table; see
-    # this test's docstring). The in-memory symbol map remains NOT durable
-    # -- a fresh engine starts with it empty until index_directory() runs
-    # again. Asserted explicitly so it can never silently regress into a
-    # false "everything survives restart" claim.
+    # The call graph IS restored (from the durable call_edges table) and so
+    # is the in-memory symbol map (from the durable symbol rows); see this
+    # test's docstring.
     assert len(engine2.call_graphs) == len(engine1.call_graphs) > 0, "call graphs are restored from the durable call_edges table"
-    assert engine2.symbols_by_id == {}, "in-memory symbol map has no backing table and must not survive restart"
+    assert set(engine2.symbols_by_id) == set(engine1.symbols_by_id) != set(), "the symbol map is restored from the durable symbol rows"
 
 
 # --- 3. Hydration never calls the embedding model ---------------------------

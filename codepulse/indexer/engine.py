@@ -1113,6 +1113,14 @@ class IndexingEngine:
         # is needed -- or correct -- for an incremental run.
         if not incremental_plan.is_incremental:
             self.bm25_index.remove_repo(repo_id)
+            # The same wipe-then-readd for the in-memory symbol map: it can
+            # start non-empty (restored from the durable rows at startup, or
+            # left by an earlier run in this process), and re-adding only the
+            # CURRENT symbols would otherwise leave a deleted file's symbols
+            # behind in autocomplete and the graph-score walk.
+            for stale_doc_id in [d for d, r in self.symbol_repo_map.items() if r == repo_id]:
+                self.symbols_by_id.pop(stale_doc_id, None)
+                self.symbol_repo_map.pop(stale_doc_id, None)
         for sym in all_symbols:
             doc_id = f"{repo_id}::{sym.file_path}::{sym.name}"
             self.symbols_by_id[doc_id] = sym
@@ -1707,11 +1715,16 @@ class IndexingEngine:
         truth throughout -- `bm25_index` is still a derived, rebuildable
         artifact (per `BM25Index`'s own class docstring), just rebuilt
         from SQL at startup instead of only ever from a fresh parse. The
-        call graph (`symbols_by_id`, `call_graph`) remains NOT durable --
-        rebuilding it needs the full parse-result/import-resolution
-        machinery `index_directory()` owns, not a plain row-to-object
-        mapping the way symbols/embeddings are; still requires a fresh
-        `index_directory()` call, unchanged by this addition.
+        in-memory symbol map (`symbols_by_id`/`symbol_repo_map`) is a
+        derived cache of the same symbol rows and is restored here too
+        (2026-10-12), and the call graph is restored from the durable
+        `call_edges` rows by `_restore_call_graph` (same date) -- both
+        previously required a fresh `index_directory()` call, which made
+        callers/impact/autocomplete and the graph part of hybrid ranking
+        silently empty after every restart. What is still NOT restored:
+        `parse_results` (so a restored graph cannot seed an incremental
+        update; see `_plan_incremental_run`) and the module-structure
+        import graph.
 
         Repository scoping: only embeddings/symbols that belong to (or
         whose File belongs to) the given `repo_url` are loaded, so data
@@ -1832,6 +1845,11 @@ class IndexingEngine:
                 # replaces this hydrated entry rather than duplicating it.
                 doc_id = f"{repo_record.id}::{fm.path}::{sm.name}"
                 self.bm25_index.add_symbol(doc_id, symbol_obj, repo_id=repo_record.id)
+                # The in-memory symbol map (hybrid ranking's graph score,
+                # autocomplete, stats) is a derived cache of these same
+                # rows; restoring it keeps those correct after a restart.
+                self.symbols_by_id[doc_id] = symbol_obj
+                self.symbol_repo_map[doc_id] = repo_record.id
                 hydrated_symbols += 1
             if hydrated_symbols:
                 self.bm25_index.build()
@@ -1883,6 +1901,11 @@ class IndexingEngine:
         graph = CallGraphBuilder.from_edges(calls, inherits)
         self.call_graphs[repo_id] = graph
         self._restored_call_graph_repo_ids.add(repo_id)
+        if self.call_graph is None:
+            # Unscoped search reads this "most recently indexed" alias; with
+            # no index run yet in this process, the first restored graph is
+            # the closest equivalent (exact for the common single-repo case).
+            self.call_graph = graph
 
     def hydrate_all(self) -> dict[str, Any]:
         """
