@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import subprocess
+import types
 
 import pytest
 
@@ -361,3 +362,65 @@ def test_display_db_path_leaves_an_already_absolute_sqlite_path_unchanged():
 
 def test_display_db_path_leaves_a_non_sqlite_url_unchanged():
     assert cli._display_db_path("postgresql://user@host/db") == "postgresql://user@host/db"
+
+
+# --- `serve --mcp` loads the embedding model before serving stdio ------------
+# Found by a live stdio-MCP check: the first semantic/hybrid `search_code`
+# call imported sentence-transformers from the tool-call worker thread, which
+# hung on Windows (>240s, vs 19s when the same import happens on the main
+# thread). In-process MCP tests could never see this, so the regression
+# guard is ordering: the model is loaded on the main thread BEFORE the stdio
+# loop starts, and nothing but protocol messages is written to stdout.
+
+class _FakeMCP:
+    def __init__(self, events):
+        self._events = events
+
+    async def run_stdio_async(self):
+        self._events.append("serve_stdio")
+
+
+def _patch_serve_mcp(monkeypatch, events, preload_error=None):
+    import codepulse.embeddings.embedder as embedder_module
+    import codepulse.mcp_server as mcp_module
+
+    class _FakeEmbedder:
+        def preload(self):
+            events.append("preload")
+            if preload_error is not None:
+                raise preload_error
+
+    monkeypatch.setattr(embedder_module, "CodeEmbedder", _FakeEmbedder)
+    monkeypatch.setattr(cli, "StorageManager", lambda db_url=None: object())
+    monkeypatch.setattr(cli, "IndexingEngine", lambda storage=None, embedder=None: types.SimpleNamespace(embedder=embedder))
+    monkeypatch.setattr(mcp_module, "build_mcp_server", lambda storage, engine, key: _FakeMCP(events))
+
+
+def _serve_mcp_args():
+    return argparse.Namespace(mcp=True, api_key="cpk_test", host="127.0.0.1", port=8000)
+
+
+def test_serve_mcp_preloads_the_embedder_before_the_stdio_loop(monkeypatch):
+    events: list[str] = []
+    _patch_serve_mcp(monkeypatch, events)
+    cli.cmd_serve(_serve_mcp_args())
+    assert events == ["preload", "serve_stdio"]
+
+
+def test_serve_mcp_still_starts_when_the_embedding_model_cannot_load(monkeypatch, capsys):
+    from codepulse.embeddings.embedder import EmbeddingUnavailableError
+
+    events: list[str] = []
+    _patch_serve_mcp(monkeypatch, events, preload_error=EmbeddingUnavailableError("no model"))
+    cli.cmd_serve(_serve_mcp_args())
+    assert events == ["preload", "serve_stdio"]  # keyword search must still be served
+    captured = capsys.readouterr()
+    assert "no model" in captured.err  # the degradation is stated, not silent
+    assert captured.out == ""  # stdout is the MCP protocol channel
+
+
+def test_serve_mcp_writes_nothing_to_stdout(monkeypatch, capsys):
+    events: list[str] = []
+    _patch_serve_mcp(monkeypatch, events)
+    cli.cmd_serve(_serve_mcp_args())
+    assert capsys.readouterr().out == ""

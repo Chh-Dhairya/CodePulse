@@ -60,6 +60,16 @@ class CodeEmbedder:
                 ) from e
         return self._model
 
+    def preload(self) -> None:
+        """
+        Loads the model now instead of on the first `encode()`. Used by
+        `serve --mcp`: importing sentence-transformers for the first time
+        from the stdio server's tool-call worker thread hangs on Windows,
+        so the model must be loaded on the main thread before serving.
+        Raises EmbeddingUnavailableError exactly as `encode()` would.
+        """
+        self._get_model()
+
     def encode(self, texts: str | list[str], batch_size: int = 32) -> np.ndarray:
         """
         Encodes a single string or list of strings into normalized embedding vectors.

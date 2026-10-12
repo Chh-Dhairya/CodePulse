@@ -629,7 +629,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
     if args.mcp:
         api_key = resolve_mcp_api_key(args.api_key)
         if not api_key:
-            console.print(
+            _stderr_console.print(
                 "[bold red]Error:[/bold red] --api-key (or the CODEPULSE_MCP_API_KEY environment "
                 "variable) is required for --mcp (MCP connections are scoped to repositories at "
                 "connection-setup time, §13)."
@@ -646,9 +646,25 @@ def cmd_serve(args: argparse.Namespace) -> None:
         try:
             mcp = build_mcp_server(storage, engine, api_key)
         except MCPAuthenticationError as e:
-            console.print(f"[bold red]Error:[/bold red] {e}")
+            _stderr_console.print(f"[bold red]Error:[/bold red] {e}")
             sys.exit(1)
-        console.print("[bold green]✓[/bold green] MCP server starting (stdio transport)...")
+        # Load the embedding model on THIS (main) thread before serving.
+        # Left lazy, the first semantic/hybrid `search_code` call imports
+        # sentence-transformers from the stdio server's tool-call worker
+        # thread, which hangs on Windows (seen live: >240s vs 19s here).
+        # If it cannot load, still serve -- keyword search works and the
+        # semantic path reports EmbeddingUnavailableError explicitly (no
+        # silent pseudo-embedding fallback).
+        from codepulse.embeddings.embedder import EmbeddingUnavailableError
+        try:
+            engine.embedder.preload()
+        except EmbeddingUnavailableError as e:
+            _stderr_console.print(
+                f"[bold yellow]Warning:[/bold yellow] embedding model unavailable ({e}); "
+                "semantic and hybrid search will return errors, keyword search still works."
+            )
+        # stdout is the MCP protocol channel: status goes to stderr only.
+        _stderr_console.print("[bold green]✓[/bold green] MCP server starting (stdio transport)...")
         asyncio.run(mcp.run_stdio_async())
         return
 
