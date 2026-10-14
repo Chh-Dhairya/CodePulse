@@ -1464,7 +1464,7 @@ class IndexingEngine:
             self._warned_module_edges_missing = True
             logger.warning(
                 "Table 'module_edges' does not exist (the database has not been migrated): "
-                "module structure will not survive a restart until `alembic upgrade head` is run."
+                "module structure will not survive a restart until `codepulse migrate` is run."
             )
         return False
 

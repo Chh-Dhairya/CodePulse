@@ -506,7 +506,17 @@ class StorageManager:
         inspector = inspect(self.engine)
         if inspector.has_table("alembic_version"):
             return
+        brand_new = not inspector.get_table_names()
         Base.metadata.create_all(bind=self.engine)
+        if brand_new:
+            # A database created from scratch here IS the current schema, so record that. Until
+            # 2026-10-14 such databases were never tracked by Alembic and could not be upgraded
+            # later (FUTURE_CHANGES items 8/17). A database that already had tables but no
+            # alembic_version (created by older code) is deliberately NOT stamped here: whether
+            # its schema matches is what `codepulse migrate` checks before it stamps.
+            from codepulse.storage.migrations import stamp_new_database
+
+            stamp_new_database(self.engine)
 
     def get_session(self) -> Session:
         return self.SessionLocal()

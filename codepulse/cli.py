@@ -561,6 +561,61 @@ def cmd_modules(args: argparse.Namespace) -> None:
     console.print(table)
 
 
+def _schema_warning(status) -> str | None:
+    """One line telling the user their database needs `codepulse migrate`, or None when nothing is wrong."""
+    if status.state == "behind":
+        return f"Database schema is {len(status.pending)} revision(s) behind ({status.current} -> {status.head}): run `codepulse migrate`."
+    if status.state == "unstamped":
+        return "Database is not tracked by Alembic: run `codepulse migrate` (its schema matches, so it will just be stamped)."
+    if status.state == "diverged":
+        return "Database schema differs from this CodePulse and cannot be stamped automatically: run `codepulse migrate` for details."
+    if status.state == "unknown":
+        return f"Database is at a revision this CodePulse does not know ({status.current}); it may belong to a newer version."
+    return None
+
+
+def cmd_migrate(args: argparse.Namespace) -> None:
+    """
+    Brings the database to the current schema, safely (item 17): creates a new one, upgrades one that is
+    behind (after a consistent backup of the SQLite file), stamps one that CodePulse created itself before
+    migrations were tracked (only if its schema matches the models), and REFUSES -- changing nothing -- one
+    that differs or comes from a newer CodePulse. `--check` only reports. Exit code: 0 up to date or done,
+    1 needs an upgrade/stamp (with --check) or was refused, 2 refused as unsafe in --check mode.
+    """
+    from codepulse.config import get_settings
+    from codepulse.storage.migrations import MigrationRefused, get_schema_status, migrate_database
+
+    settings = get_settings()
+    try:
+        result = migrate_database(settings.db_url, backup=not args.no_backup, check=args.check)
+    except MigrationRefused as e:
+        status = get_schema_status(settings.db_url)
+        if args.json:
+            _print_json({"action": "refused", "state": status.state, "from": status.current, "to": status.head,
+                         "differences": status.differences, "message": str(e)})
+        else:
+            _stderr_console.print(f"[bold red]Refused:[/bold red] {e}")
+            for d in status.differences:
+                _stderr_console.print(f"  - {d}")
+        sys.exit(1)
+
+    payload = {
+        "action": result.action, "state": result.state, "from": result.from_revision, "to": result.to_revision,
+        "applied": result.applied, "backup": result.backup_path, "detail": result.detail,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        colour = {"created": "green", "upgraded": "green", "stamped": "green", "up-to-date": "green"}.get(result.action, "yellow")
+        console.print(f"[{colour}]{result.action}[/{colour}]: {result.detail or result.state}")
+        if result.backup_path:
+            console.print(f"[dim]backup of the previous state: {result.backup_path}[/dim]")
+        if result.action in ("needs-upgrade", "needs-stamp"):
+            console.print("Run `codepulse migrate` to apply.")
+    if args.check:
+        sys.exit({"up-to-date": 0, "needs-upgrade": 1, "needs-stamp": 1, "blocked": 2}.get(result.action, 0))
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Environment/config diagnostics -- embedding model loads? DB reachable? ignore rules active?"""
     from codepulse.config import get_settings
@@ -579,6 +634,15 @@ def cmd_doctor(args: argparse.Namespace) -> None:
         checks.append({"check": "database_reachable", "ok": True, "detail": settings.db_url})
     except Exception as e:
         checks.append({"check": "database_reachable", "ok": False, "detail": str(e)})
+
+    try:
+        from codepulse.storage.migrations import get_schema_status
+
+        schema = get_schema_status(settings.db_url)
+        warning = _schema_warning(schema)
+        checks.append({"check": "database_schema", "ok": warning is None, "detail": warning or schema.detail})
+    except Exception as e:
+        checks.append({"check": "database_schema", "ok": False, "detail": str(e)})
 
     try:
         embedder = CodeEmbedder()
@@ -770,6 +834,14 @@ def main() -> None:
     doctor_p.add_argument("--json", action="store_true")
 
     # 14. serve
+    migrate_p = subparsers.add_parser(
+        "migrate",
+        help="Bring the database up to the current schema (backs it up first; refuses anything it cannot do safely)",
+    )
+    migrate_p.add_argument("--check", action="store_true", help="Only report; change nothing. Exit 0 if up to date, 1 if it needs migrating, 2 if it cannot be migrated safely")
+    migrate_p.add_argument("--no-backup", action="store_true", help="Do not copy a SQLite database before changing it")
+    migrate_p.add_argument("--json", action="store_true")
+
     serve_p = subparsers.add_parser("serve", help="Start the local API server (or the MCP server with --mcp)")
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
@@ -840,6 +912,15 @@ def main() -> None:
             )
         else:
             _stderr_console.print(f"[dim]Using database: {resolved_db}[/dim]")
+            if args.command != "migrate":
+                try:
+                    from codepulse.storage.migrations import get_schema_status
+
+                    warning = _schema_warning(get_schema_status(settings.db_url))
+                except Exception:
+                    warning = None  # never let a status lookup get in the way of the command itself
+                if warning:
+                    _stderr_console.print(f"[yellow]⚠ {warning}[/yellow]")
 
     if args.command == "parse":
         cmd_parse(args)
@@ -869,6 +950,8 @@ def main() -> None:
         cmd_modules(args)
     elif args.command == "doctor":
         cmd_doctor(args)
+    elif args.command == "migrate":
+        cmd_migrate(args)
     elif args.command == "serve":
         cmd_serve(args)
 

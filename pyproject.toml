@@ -128,10 +128,12 @@ build-backend = "setuptools.build_meta"
 # package discovery finds TWO top-level packages at the repo root
 # (`alembic`, `codepulse`) and refuses to guess which to install,
 # so `pip install -e .` has failed outright since Phase 2.1. Explicit
-# `include` limits discovery to the one real installable package --
-# `alembic/` is this project's OWN migration script directory (run via
-# `alembic upgrade head`, never imported as a library), not a package
-# meant to be installed.
+# `include` limits discovery to the one real installable package.
+# 2026-10-14 (finding K): the migration scripts used to live in a top-level
+# `alembic/` folder OUTSIDE that package, so a built wheel shipped none of
+# them. They now live inside it, in `codepulse/storage/schema_migrations/`,
+# and `codepulse migrate` runs them from there (`alembic.ini`, kept for
+# developers, points at the same folder).
 # Installs a real `codepulse` command (previously only `python -m
 # codepulse.cli` worked, so e.g. the VS Code extension's default
 # `codepulse.serverCommand` of "codepulse" could never launch a server).
@@ -140,6 +142,11 @@ codepulse = "codepulse.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["codepulse*"]
+
+# The .py migration scripts are picked up as (namespace) packages; the template and
+# README are not Python files, so they must be listed.
+[tool.setuptools.package-data]
+"codepulse.storage.schema_migrations" = ["script.py.mako", "README"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -94,13 +94,24 @@ Precedence: CLI flags > `CODEPULSE_*` environment variables > `codepulse.toml` >
 
 ## Upgrading an existing database
 
-A database CodePulse created itself on first run has no migration history and picks up new tables automatically. A database that Alembic manages (one that has been migrated before) needs this once after updating, from the repository root:
+After updating CodePulse, bring the database up to date with one command:
 
 ```bash
-alembic upgrade head
+codepulse migrate            # apply (backs the SQLite file up first)
+codepulse migrate --check    # only report: exit 0 up to date, 1 needs migrating, 2 cannot be migrated safely
 ```
 
-The database URL comes from `CODEPULSE_DB_URL`, a `codepulse.toml` in that directory, or the default `sqlite:///codepulse.db`. Back it up first (see `docs/BACKUP_RESTORE.md`). Until you do, CodePulse keeps working; the only effect is that module structure is not restored after a restart (a warning is logged), and it returns once you have upgraded and re-indexed the repository.
+It works on whatever database CodePulse is configured for (`--db-url`, `CODEPULSE_DB_URL`, a `codepulse.toml` in the current directory, or the default `sqlite:///codepulse.db`) and does the safe thing for each case:
+
+| The database is | `migrate` |
+|---|---|
+| new (no tables yet) | creates it at the current schema |
+| behind | copies it to `<file>.pre-<revision>-<time>.bak`, then upgrades it |
+| from an older CodePulse and was never tracked | checks its schema against the models and, only if it matches, records it as up to date (after a backup) |
+| not tracked and its schema differs | refuses, lists what differs, changes nothing |
+| from a newer CodePulse | refuses, changes nothing |
+
+Every CodePulse command prints a warning on stderr when the database is behind, and `codepulse doctor` reports the schema state. Until you migrate, CodePulse keeps working; features that need a newer table (for example module structure after a restart) are simply unavailable and a warning is logged. A database CodePulse creates from scratch is tracked from the start, so it can always be upgraded this way. The migration scripts ship inside the package, so this works from an installed copy as well as from a checkout.
 
 ## Development
 
@@ -108,7 +119,7 @@ The database URL comes from `CODEPULSE_DB_URL`, a `codepulse.toml` in that direc
 pytest tests/ -q
 ```
 
-Schema changes go through Alembic (`alembic/`, `alembic.ini`). PostgreSQL, Redis, and distributed workers are intentionally out of scope for now.
+Schema changes go through Alembic (`codepulse/storage/schema_migrations/`; `alembic.ini` in the repository root points at it for `alembic revision`/`alembic upgrade` during development). PostgreSQL, Redis, and distributed workers are intentionally out of scope for now.
 
 ## Project documents
 

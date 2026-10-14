@@ -20,6 +20,7 @@ from codepulse.storage.migrations import (
     downgrade_migrations,
     get_alembic_config,
     get_current_revision,
+    head_revision,
     run_migrations,
     stamp_database,
 )
@@ -37,7 +38,9 @@ def test_alembic_config_loads():
     cfg = get_alembic_config()
     assert cfg is not None
     assert cfg.get_main_option("script_location") is not None
-    assert "alembic" in cfg.get_main_option("script_location")
+    # The scripts live inside the package (FUTURE_CHANGES finding K) and the config needs no alembic.ini;
+    # this used to assert the folder was called "alembic".
+    assert "schema_migrations" in cfg.get_main_option("script_location")
 
 
 def test_fresh_database_migration_scenario_1():
@@ -360,7 +363,14 @@ def test_storage_manager_still_creates_tables_on_a_genuinely_fresh_database():
     at all (no `alembic_version` table -- the exact shape of every test
     fixture in this project's own suite, e.g. `tests/conftest.py`'s
     `isolated_app`) must still get a full, zero-setup schema from
-    `StorageManager`'s `create_all()`, unchanged from before this fix.
+    `StorageManager`'s `create_all()`.
+
+    2026-10-14 (FUTURE_CHANGES items 8/17, user-approved): this test used to
+    assert that such a database was NOT tracked ("no migration history, by
+    design"), which is exactly why a database CodePulse created itself could
+    never be upgraded later. It is now recorded at the head revision as soon
+    as it is created (a legacy database that already has tables but no
+    tracking is still left alone; see test_migrate_command.py).
     """
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         temp_db_path = f.name
@@ -373,11 +383,11 @@ def test_storage_manager_still_creates_tables_on_a_genuinely_fresh_database():
         storage = StorageManager(db_url=db_url)
         insp = inspect(storage.engine)
         table_names = set(insp.get_table_names())
-        assert "alembic_version" not in table_names, (
-            "a fresh StorageManager-created database is NOT Alembic-managed "
-            "-- it has real tables but no migration history, by design "
-            "(this is the pre-existing, unchanged 'disposable test DB' path)"
+        assert "alembic_version" in table_names, (
+            "a database StorageManager creates from scratch must be tracked from the start, "
+            "or it can never be upgraded later"
         )
+        assert get_current_revision(db_url) == head_revision()
         assert {"repositories", "files", "symbols", "call_edges"}.issubset(table_names)
     finally:
         if storage is not None and hasattr(storage, "engine"):
