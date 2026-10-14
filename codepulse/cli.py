@@ -479,8 +479,10 @@ def cmd_status(args: argparse.Namespace) -> None:
     engine = IndexingEngine()
     session = engine.storage.get_session()
     try:
-        repo_url = os.path.abspath(args.path)
-        repo = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+        from codepulse.repository_identity import canonical_repository_url, find_repository
+
+        repo_url = canonical_repository_url(args.path)
+        repo = find_repository(session, args.path)
         if not repo:
             payload = {"indexed": False, "path": repo_url}
             if args.json:

@@ -71,6 +71,8 @@ The raw key is shown once and only its hash is stored. `repository_ids` must ref
 
 Main endpoints: `POST /v1/search`, `POST /v1/repositories/index`, `GET /v1/repositories/{id}/index-status`, `GET /v1/symbols/{id}`, `POST /v1/symbols/{id}/impact-analysis`, `POST /v1/symbols/{id}/similar`, `GET /v1/symbols/{id}/references`, `POST /v1/agent/context`. Errors always use one shape: `{"error": {"code", "message", "details"}}`. Requests are rate-limited per key (5 req/s, burst 20, configurable).
 
+A local repository is identified by its canonical path (absolute, symlinks and `..` resolved, true case and an uppercase drive letter on Windows, no trailing separator), so `C:\\proj`, `c:/proj/` and `C:\\proj\\sub\\..` are one repository, not three.
+
 Local-path ingestion can be restricted to an allow-list with `ingestion_allowed_roots` (or `CODEPULSE_INGESTION_ALLOWED_ROOTS`). Cloning from git URLs is not implemented: the URL is validated (https/ssh, SSRF check) and the request is then rejected with 501.
 
 ## MCP server

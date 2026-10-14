@@ -82,13 +82,13 @@ def test_fresh_database_migration_scenario_1():
         }
         assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 
-        # Verify revision recorded (head now includes the module_edges migration
+        # Verify revision recorded (head now includes the repository-url canonicalization and the module_edges migrations
         # on top of Phase 7.2's
         # api_key_repositories.role migration on top of Phase 4.1's
         # base_classes/relationship_type migration and the
         # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "7c3e5a91d2f4"
+        assert current_rev == "a41f0d2c6b8e"
 
         # Verify the isolation-fix column exists on call_edges
         call_edge_cols = {col["name"] for col in insp.get_columns("call_edges")}
@@ -249,7 +249,7 @@ def test_existing_database_stamping_scenario_2():
         # 4.1's base_classes/relationship_type migration and the
         # repository-isolation fix)
         current_rev = get_current_revision(db_url)
-        assert current_rev == "7c3e5a91d2f4"
+        assert current_rev == "a41f0d2c6b8e"
 
         # Verify data integrity is 100% preserved
         with engine.connect() as conn:
@@ -1130,7 +1130,7 @@ def test_module_edges_migration_preserves_data_creates_the_table_and_downgrades_
             conn.commit()
         assert "module_edges" not in inspect(engine).get_table_names()
 
-        run_migrations(db_url=db_url, revision="head")
+        run_migrations(db_url=db_url, revision="7c3e5a91d2f4")
         assert get_current_revision(db_url) == "7c3e5a91d2f4"
 
         with engine.connect() as conn:
@@ -1173,3 +1173,72 @@ def test_module_edges_migration_preserves_data_creates_the_table_and_downgrades_
                 os.remove(temp_db_path)
             except Exception:
                 pass
+
+
+def test_repository_url_canonicalization_migration_rewrites_spellings_and_never_merges_or_deletes(tmp_path):
+    """
+    Upgrading a database at 7c3e5a91d2f4 to a41f0d2c6b8e canonicalizes the local-path
+    `repositories.url` values that exist, leaving everything that is not a local path
+    untouched, and NEVER merging or deleting a duplicate that predates the fix.
+    """
+    from codepulse.repository_identity import canonical_repository_url
+
+    proj = tmp_path / "proj"
+    other = tmp_path / "other"
+    dup = tmp_path / "dup"
+    for d in (proj, other, dup, other / "sub"):
+        d.mkdir(parents=True, exist_ok=True)
+
+    db_url = f"sqlite:///{(tmp_path / 'mig.db').as_posix()}"
+    rows = [
+        (1, str(proj) + os.sep),                         # trailing separator
+        (2, os.path.join(str(other), ".", "sub", "..")),  # dot segments
+        (3, "https://github.com/org/repo"),               # not a path
+        (4, "file:///seed/anchor"),                       # not a path
+        (5, str(dup)),                                    # already canonical ...
+        (6, str(dup) + os.sep),                           # ... and a duplicate of 5 that predates the fix
+    ]
+    if os.name == "nt":
+        rows.append((7, str(tmp_path / "winproj")[0].lower() + str(tmp_path / "winproj")[1:]))  # lowercase drive
+        (tmp_path / "winproj").mkdir()
+
+    engine = None
+    try:
+        run_migrations(db_url=db_url, revision="7c3e5a91d2f4")
+        engine = create_engine(db_url)
+        with engine.connect() as conn:
+            for repo_id, url in rows:
+                conn.execute(
+                    text("INSERT INTO repositories (id, team_id, name, url, file_count, symbol_count) VALUES (:i, 1, :n, :u, 1, 1)"),
+                    {"i": repo_id, "n": f"r{repo_id}", "u": url},
+                )
+            conn.execute(text(
+                "INSERT INTO files (id, repo_id, path, language, size_bytes, line_count, content_hash) "
+                "VALUES (1, 1, 'main.py', 'python', 1, 1, 'aa')"))
+            conn.commit()
+
+        run_migrations(db_url=db_url, revision="head")
+        assert get_current_revision(db_url) == "a41f0d2c6b8e"
+
+        with engine.connect() as conn:
+            urls = dict(conn.execute(text("SELECT id, url FROM repositories")).fetchall())
+            assert conn.execute(text("SELECT count(*) FROM files WHERE repo_id = 1")).scalar() == 1, "child rows untouched"
+
+        assert urls[1] == canonical_repository_url(str(proj))
+        assert urls[2] == canonical_repository_url(str(other))
+        assert urls[3] == "https://github.com/org/repo"
+        assert urls[4] == "file:///seed/anchor"
+        assert urls[5] == canonical_repository_url(str(dup))
+        assert urls[6] == str(dup) + os.sep, "the duplicate of row 5 must be left unchanged, not merged or deleted"
+        assert len(urls) == len(rows), "no row is ever deleted"
+        if os.name == "nt":
+            assert urls[7][0].isupper()
+
+        # idempotent: running it again changes nothing
+        downgrade_migrations(db_url=db_url, revision="7c3e5a91d2f4")
+        run_migrations(db_url=db_url, revision="head")
+        with engine.connect() as conn:
+            assert dict(conn.execute(text("SELECT id, url FROM repositories")).fetchall()) == urls
+    finally:
+        if engine is not None:
+            engine.dispose()

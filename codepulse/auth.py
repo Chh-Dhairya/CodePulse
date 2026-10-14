@@ -43,6 +43,7 @@ from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 
+from codepulse.repository_identity import canonical_repository_url, find_repository
 from codepulse.storage.db import APIKeyModel, APIKeyRepositoryModel, RepositoryModel, StorageManager
 
 API_KEY_PREFIX = "cpk_"
@@ -294,10 +295,10 @@ def create_repository_owned_by(
     """
     session = storage.get_session()
     try:
-        existing = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+        existing = find_repository(session, repo_url)
         if existing is not None:
             return existing.id, False
-        repo = RepositoryModel(name=repo_name, url=repo_url, file_count=0, symbol_count=0)
+        repo = RepositoryModel(name=repo_name, url=canonical_repository_url(repo_url), file_count=0, symbol_count=0)
         session.add(repo)
         session.flush()
         session.add(APIKeyRepositoryModel(api_key_id=api_key_id, repo_id=repo.id, role="admin"))
@@ -306,7 +307,7 @@ def create_repository_owned_by(
     except IntegrityError:
         # Lost a race to create the same url: the other request owns it.
         session.rollback()
-        existing = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+        existing = find_repository(session, repo_url)
         if existing is None:
             raise
         return existing.id, False

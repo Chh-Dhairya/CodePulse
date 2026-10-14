@@ -28,7 +28,7 @@ Not a roadmap sprint item. Nothing here is authoritative the way `CodePulse_Stra
 
 ---
 
-## 2. Repository path matching doesn't normalize backslash vs. forward-slash
+## 2. Repository path matching doesn't normalize backslash vs. forward-slash — **RESOLVED 2026-10-14** (see CODEPULSE_PROGRESS.md, "One repository, one identity")
 
 > **Update 2026-10-12 (found by the real-VS-Code tests): this now has a user-visible effect.** VS Code reports a Windows folder as `c:\\...` (lowercase drive) while a repository indexed from the CLI is stored as `C:\\...`. The extension matches case-insensitively when it looks a folder up, but sent the raw path to `POST /v1/repositories/index`, which compares the URL string exactly, so clicking Index Workspace created a DUPLICATE repository (a new id) that the user's key could not see, instead of re-indexing the existing one. The extension now sends the stored URL when the folder matches (commit in `codepulse-vscode`), which removes the symptom for re-indexing, but the server still treats `c:\\x` and `C:\\x` as different repositories for every other client (CLI, MCP, REST). Canonicalizing repository identity on the server (case on Windows, slashes, trailing separators), with a migration for existing URLs, remains the real fix.
 

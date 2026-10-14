@@ -24,6 +24,7 @@ from codepulse.config import get_settings
 from codepulse.embeddings.embedder import EmbeddingUnavailableError
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.ingestion_safety import IngestionSafetyError, validate_git_url, validate_local_path
+from codepulse.repository_identity import canonical_repository_url, find_repository
 from codepulse.jobs import create_job, get_active_job, get_job, mark_failed, mark_running, mark_succeeded
 from codepulse.rate_limit import get_limiter
 from codepulse.storage.db import (
@@ -358,7 +359,7 @@ def index_repository(
     # which paths exist on the host.
     _session = storage_manager.get_session()
     try:
-        _existing_repo = _session.query(RepositoryModel).filter(RepositoryModel.url == req.url).first()
+        _existing_repo = find_repository(_session, req.url)
         _existing_repo_id = _existing_repo.id if _existing_repo else None
     finally:
         _session.close()
@@ -383,7 +384,11 @@ def index_repository(
     except IngestionSafetyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    repo_name = os.path.basename(req.url)
+    repo_name = os.path.basename(req.url.rstrip("/\\")) or os.path.basename(req.url)
+    # One identity per repository however its path is spelled (FUTURE_CHANGES
+    # item 2): the lookup above finds an existing repository under any spelling,
+    # and a new one is stored -- and indexed -- under the canonical form.
+    canonical_url = canonical_repository_url(req.url)
     # Phase 1.3: resolve (or create) the real repository id up front, so the
     # new IndexJob row can be linked to a real repository id and the
     # one-active-job-per-repository check below has something to check
@@ -397,7 +402,7 @@ def index_repository(
         # The row and the creator's admin grant are written in one
         # transaction, and only the call that actually creates the
         # repository becomes its owner.
-        repo_id, created = create_repository_owned_by(storage_manager, repo_name, req.url, auth.api_key_id)
+        repo_id, created = create_repository_owned_by(storage_manager, repo_name, canonical_url, auth.api_key_id)
         if not created:
             # Another request created this url first: no grant here; apply
             # the normal existing-repository role check.
@@ -435,7 +440,7 @@ def index_repository(
             result = indexing_engine.index_directory(
                 repo_path=resolved_path,
                 repo_name=repo_name,
-                repo_url=req.url,
+                repo_url=canonical_url,
             )
             indexing_duration_seconds.observe(time.time() - _t0)
             files_indexed_total.inc(result.get("total_files", 0))
@@ -465,7 +470,7 @@ def index_repository(
         "job_id": f"job_{job.id}",
         "repository_id": repo_id,
         "status": job.status,
-        "url": req.url,
+        "url": canonical_url,
     }
 
 

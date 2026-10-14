@@ -21,6 +21,7 @@ from codepulse.models import CallGraphEdge, FileParseResult, Symbol, SymbolType,
 from codepulse.parser.factory import get_parser_for_file
 from codepulse.parser.graph import CallGraphBuilder
 from codepulse.parser.module_graph import ModuleGraphBuilder
+from codepulse.repository_identity import canonical_repository_url, find_repository
 from codepulse.search.bm25 import BM25Index
 from codepulse.search.ranker import HybridRanker, SearchResultItem
 from codepulse.search.vector import VectorIndex
@@ -206,9 +207,11 @@ class IndexingEngine:
         """
         session = self.storage.get_session()
         try:
-            repo_record = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+            repo_record = find_repository(session, repo_url)
             if repo_record is None:
-                repo_record = RepositoryModel(name=repo_name, url=repo_url, file_count=0, symbol_count=0)
+                repo_record = RepositoryModel(
+                    name=repo_name, url=canonical_repository_url(repo_url), file_count=0, symbol_count=0
+                )
                 session.add(repo_record)
                 session.commit()
             return repo_record.id
@@ -806,7 +809,8 @@ class IndexingEngine:
         Indexes all parseable files within a repository directory.
         """
         repo_path = os.path.abspath(repo_path)
-        resolved_repo_url = repo_url or repo_path
+        # One identity per repository however its path is spelled (FUTURE_CHANGES item 2).
+        resolved_repo_url = canonical_repository_url(repo_url or repo_path)
 
         # Phase 0.6: resolve the real repo_id BEFORE parsing/chunking, so
         # every in-memory BM25/vector document created below can be tagged
@@ -1564,15 +1568,11 @@ class IndexingEngine:
             now = datetime.utcnow()
 
             # --- Repository upsert (natural key: url) ---
-            repo_record = (
-                session.query(RepositoryModel)
-                .filter(RepositoryModel.url == repo_url)
-                .first()
-            )
+            repo_record = find_repository(session, repo_url)
             if repo_record is None:
                 repo_record = RepositoryModel(
                     name=repo_name,
-                    url=repo_url,
+                    url=canonical_repository_url(repo_url),
                     # Placeholder -- overwritten below with a real DB count
                     # once this run's File/Symbol upserts are flushed.
                     file_count=len(parsed_files),
@@ -1879,9 +1879,7 @@ class IndexingEngine:
         """
         session = self.storage.get_session()
         try:
-            repo_record = (
-                session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
-            )
+            repo_record = find_repository(session, repo_url)
             if repo_record is None:
                 return {
                     "repo_id": None,
