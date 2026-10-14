@@ -16,9 +16,13 @@ A database can be in one of these states (`get_schema_status`):
   behind     tracked, at an older revision this CodePulse knows: `migrate` upgrades it
   unstamped  has tables but was never tracked (created by `create_all`, as every
              database CodePulse made before this change) AND its schema matches the
-             models: `migrate` stamps it at head
-  diverged   unstamped and its schema DIFFERS from the models: stamping it would claim
-             a schema it does not have, so `migrate` refuses and says what differs
+             models, apart from tables it simply does not have yet (a database made
+             before a table existed, not opened by newer code since): `migrate`
+             creates those empty tables and stamps it at head
+  diverged   unstamped and its schema DIFFERS from the models in any other way (a
+             missing or extra column, an extra table -- e.g. a legacy table that a later
+             migration renames): stamping it would claim a schema it does not have, so
+             `migrate` refuses and says what differs
   unknown    tracked, but at a revision this CodePulse does not have (a database from
              a newer CodePulse): `migrate` refuses
 
@@ -142,6 +146,7 @@ class SchemaStatus:
     head: str
     pending: list[str] = field(default_factory=list)  # revisions `migrate` would apply, oldest first
     differences: list[str] = field(default_factory=list)  # for diverged: what differs from the models
+    missing_tables: list[str] = field(default_factory=list)  # for unstamped: tables `migrate` will create
     detail: str = ""
 
     @property
@@ -162,15 +167,21 @@ def _pending(current: str) -> list[str]:
     return [rev for rev in reversed(revisions) if rev != current]
 
 
-def _structural_differences(engine: Engine) -> list[str]:
+def _structural_differences(engine: Engine) -> tuple[list[str], list[str]]:
+    """
+    `(differences, missing_tables)`: what in the database does NOT match the models, split into things that
+    make it unsafe to stamp (`differences`) and tables that are merely absent (`missing_tables`). Creating an
+    absent empty table cannot conflict with existing data, so those alone do not block.
+    """
     with engine.connect() as conn:
         context = MigrationContext.configure(conn, opts={"compare_type": False, "compare_server_default": False})
         diffs = compare_metadata(context, Base.metadata)
     out: list[str] = []
+    missing: list[str] = []
     for diff in diffs:
         kind = diff[0]
         if kind == "add_table":
-            out.append(f"table {diff[1].name} is missing")
+            missing.append(diff[1].name)
         elif kind == "remove_table":
             if diff[1].name != "alembic_version":
                 out.append(f"table {diff[1].name} is not in the models")
@@ -178,7 +189,7 @@ def _structural_differences(engine: Engine) -> list[str]:
             out.append(f"column {diff[2]}.{diff[3].name} is missing")
         elif kind == "remove_column":
             out.append(f"column {diff[2]}.{diff[3].name} is not in the models")
-    return sorted(out)
+    return sorted(out), sorted(missing)
 
 
 def get_schema_status(db_url: str | None = None) -> SchemaStatus:
@@ -210,11 +221,18 @@ def get_schema_status(db_url: str | None = None) -> SchemaStatus:
                 )
             pending = _pending(current)
             return SchemaStatus("behind", current, head, pending, detail=f"at {current}, {len(pending)} revision(s) behind {head}")
-        differences = _structural_differences(engine)
+        differences, missing_tables = _structural_differences(engine)
         if differences:
             return SchemaStatus(
                 "diverged", None, head, differences=differences,
-                detail="not tracked by Alembic and its schema differs from the models: " + "; ".join(differences),
+                missing_tables=missing_tables,
+                detail="not tracked by Alembic and its schema differs from the models: "
+                + "; ".join(differences + [f"table {t} is missing" for t in missing_tables]),
+            )
+        if missing_tables:
+            return SchemaStatus(
+                "unstamped", None, head, missing_tables=missing_tables,
+                detail=f"not tracked by Alembic; its schema matches the models except for missing table(s) {', '.join(missing_tables)}, which migrate will create",
             )
         return SchemaStatus("unstamped", None, head, detail="not tracked by Alembic, but its schema matches the models")
     finally:
@@ -312,7 +330,18 @@ def migrate_database(db_url: str | None = None, *, backup: bool = True, check: b
         run_migrations(target_url)
         _verify(target_url, backup_path)
         return MigrationResult("upgraded", "behind", status.current, head, backup_path, list(status.pending), f"upgraded {status.current} -> {head}")
-    # unstamped and matching the models
+    # unstamped and matching the models, apart from tables it does not have yet
+    created: list[str] = []
+    if status.missing_tables:
+        engine = create_engine(target_url)
+        try:
+            Base.metadata.create_all(engine, tables=[Base.metadata.tables[name] for name in status.missing_tables])
+        finally:
+            engine.dispose()
+        created = list(status.missing_tables)
     stamp_database(target_url)
     _verify(target_url, backup_path)
-    return MigrationResult("stamped", "unstamped", None, head, backup_path, [], f"stamped at {head} (its schema matches the models)")
+    detail = f"stamped at {head} (its schema matches the models)"
+    if created:
+        detail = f"created missing table(s) {', '.join(created)} and stamped at {head}"
+    return MigrationResult("stamped", "unstamped", None, head, backup_path, [], detail)

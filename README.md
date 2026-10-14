@@ -107,8 +107,8 @@ It works on whatever database CodePulse is configured for (`--db-url`, `CODEPULS
 |---|---|
 | new (no tables yet) | creates it at the current schema |
 | behind | copies it to `<file>.pre-<revision>-<time>.bak`, then upgrades it |
-| from an older CodePulse and was never tracked | checks its schema against the models and, only if it matches, records it as up to date (after a backup) |
-| not tracked and its schema differs | refuses, lists what differs, changes nothing |
+| from an older CodePulse and was never tracked | checks its schema against the models; if it matches (tables it does not have yet are simply created, empty), records it as up to date, after a backup |
+| not tracked and its schema differs in any other way (a missing or extra column, an extra table) | refuses, lists what differs, changes nothing |
 | from a newer CodePulse | refuses, changes nothing |
 
 Every CodePulse command prints a warning on stderr when the database is behind, and `codepulse doctor` reports the schema state. Until you migrate, CodePulse keeps working; features that need a newer table (for example module structure after a restart) are simply unavailable and a warning is logged. A database CodePulse creates from scratch is tracked from the start, so it can always be upgraded this way. The migration scripts ship inside the package, so this works from an installed copy as well as from a checkout.

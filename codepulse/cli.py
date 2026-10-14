@@ -566,7 +566,8 @@ def _schema_warning(status) -> str | None:
     if status.state == "behind":
         return f"Database schema is {len(status.pending)} revision(s) behind ({status.current} -> {status.head}): run `codepulse migrate`."
     if status.state == "unstamped":
-        return "Database is not tracked by Alembic: run `codepulse migrate` (its schema matches, so it will just be stamped)."
+        extra = f" and create missing table(s) {', '.join(status.missing_tables)}" if status.missing_tables else ""
+        return f"Database is not tracked by Alembic: run `codepulse migrate` (its schema matches, so it will just be stamped{extra})."
     if status.state == "diverged":
         return "Database schema differs from this CodePulse and cannot be stamped automatically: run `codepulse migrate` for details."
     if status.state == "unknown":

@@ -79,6 +79,25 @@ def _create_all_unstamped(url):
         engine.dispose()
 
 
+def _drop_table(url, table):
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP TABLE {table}"))
+    finally:
+        engine.dispose()
+
+
+def _drop_column(url, table, column):
+    """A schema difference that is NOT just a missing table: a column the models have is gone."""
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
+    finally:
+        engine.dispose()
+
+
 def _seed_repo(url, repo_url="file:///seed"):
     engine = create_engine(url)
     try:
@@ -136,17 +155,49 @@ def test_tables_created_by_create_all_with_no_alembic_version_are_unstamped_and_
     assert status.differences == []
 
 
-def test_an_unstamped_database_missing_a_table_the_models_have_is_diverged(tmp_path):
+def test_an_unstamped_database_missing_only_a_table_is_fixable(tmp_path):
+    """Created by older code before a table existed and not opened by newer code since: creating the missing
+    (empty) table cannot conflict with anything, so this is stampable, not diverged."""
+    _create_all_unstamped(_url(tmp_path))
+    _drop_table(_url(tmp_path), "module_edges")
+
+    status = get_schema_status(_url(tmp_path))
+
+    assert status.state == "unstamped"
+    assert status.missing_tables == ["module_edges"]
+    assert status.differences == []
+
+
+def test_an_unstamped_database_missing_a_column_is_diverged(tmp_path):
+    _create_all_unstamped(_url(tmp_path))
+    _drop_column(_url(tmp_path), "repositories", "branch")
+
+    status = get_schema_status(_url(tmp_path))
+
+    assert status.state == "diverged"
+    assert any("repositories.branch" in d for d in status.differences)
+
+
+def test_a_missing_table_does_not_hide_a_column_difference(tmp_path):
+    _create_all_unstamped(_url(tmp_path))
+    _drop_table(_url(tmp_path), "module_edges")
+    _drop_column(_url(tmp_path), "repositories", "branch")
+
+    assert get_schema_status(_url(tmp_path)).state == "diverged"
+
+
+def test_an_unstamped_database_with_a_table_the_models_do_not_have_is_diverged(tmp_path):
+    """e.g. a legacy table that a later migration renames: stamping would orphan its data."""
     _create_all_unstamped(_url(tmp_path))
     engine = create_engine(_url(tmp_path))
     with engine.begin() as conn:
-        conn.execute(text("DROP TABLE module_edges"))
+        conn.execute(text("CREATE TABLE dependencies (id INTEGER PRIMARY KEY, source TEXT)"))
     engine.dispose()
 
     status = get_schema_status(_url(tmp_path))
 
     assert status.state == "diverged"
-    assert any("module_edges" in d for d in status.differences)
+    assert any("dependencies" in d for d in status.differences)
 
 
 def test_a_database_stamped_with_a_revision_this_codepulse_does_not_have_is_unknown(tmp_path):
@@ -225,18 +276,42 @@ def test_an_unstamped_database_whose_schema_matches_is_stamped_without_touching_
     assert result.backup_path and Path(result.backup_path).exists()
 
 
+def test_an_unstamped_database_missing_only_a_table_gets_it_created_and_is_stamped_with_its_data_intact(tmp_path):
+    _create_all_unstamped(_url(tmp_path))
+    _seed_repo(_url(tmp_path), "file:///legacy")
+    _drop_table(_url(tmp_path), "module_edges")
+
+    result = migrate_database(_url(tmp_path))
+
+    assert result.action == "stamped"
+    assert "module_edges" in result.detail
+    assert "module_edges" in _tables(_url(tmp_path))
+    assert get_current_revision(_url(tmp_path)) == head_revision()
+    assert _repo_urls(_url(tmp_path)) == ["file:///legacy"]
+    assert result.backup_path and Path(result.backup_path).exists()
+    assert get_schema_status(_url(tmp_path)).state == "current"
+
+
+def test_check_reports_that_a_missing_table_will_be_created(tmp_path):
+    _create_all_unstamped(_url(tmp_path))
+    _drop_table(_url(tmp_path), "module_edges")
+    before = _file_hash(tmp_path)
+
+    result = migrate_database(_url(tmp_path), check=True)
+
+    assert result.action == "needs-stamp" and "module_edges" in result.detail
+    assert _file_hash(tmp_path) == before
+
+
 def test_a_diverged_unstamped_database_is_refused_and_left_exactly_as_it_was(tmp_path):
     _create_all_unstamped(_url(tmp_path))
-    engine = create_engine(_url(tmp_path))
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE module_edges"))
-    engine.dispose()
+    _drop_column(_url(tmp_path), "repositories", "branch")
     before = _file_hash(tmp_path)
 
     with pytest.raises(MigrationRefused) as excinfo:
         migrate_database(_url(tmp_path))
 
-    assert "module_edges" in str(excinfo.value)
+    assert "repositories.branch" in str(excinfo.value)
     assert _file_hash(tmp_path) == before
     assert get_current_revision(_url(tmp_path)) is None
     assert list(tmp_path.glob("*.bak")) == []
@@ -330,17 +405,24 @@ def test_cli_migrate_check_exit_codes(tmp_path, monkeypatch, capsys):
 
 def test_cli_migrate_refuses_a_diverged_database_with_a_nonzero_exit_and_the_differences(tmp_path, monkeypatch, capsys):
     _create_all_unstamped(_url(tmp_path))
-    engine = create_engine(_url(tmp_path))
-    with engine.begin() as conn:
-        conn.execute(text("DROP TABLE module_edges"))
-    engine.dispose()
+    _drop_column(_url(tmp_path), "repositories", "branch")
     before = _file_hash(tmp_path)
 
     code, out, err = _run_cli(monkeypatch, capsys, "--db-url", _url(tmp_path), "migrate")
 
     assert code == 1
-    assert "module_edges" in out + err
+    assert "repositories.branch" in out + err
     assert _file_hash(tmp_path) == before
+
+
+def test_cli_migrate_fixes_a_database_missing_only_a_table(tmp_path, monkeypatch, capsys):
+    _create_all_unstamped(_url(tmp_path))
+    _drop_table(_url(tmp_path), "module_edges")
+
+    code, out, _ = _run_cli(monkeypatch, capsys, "--db-url", _url(tmp_path), "migrate", "--json")
+
+    assert code == 0 and json.loads(out)["action"] == "stamped"
+    assert get_schema_status(_url(tmp_path)).state == "current"
 
 
 def test_other_commands_warn_on_stderr_when_the_database_is_behind(tmp_path, monkeypatch, capsys):
