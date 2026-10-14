@@ -12,7 +12,14 @@ from pydantic import BaseModel, Field
 
 from codepulse.api.errors import _record_api_error, error_json_response, install_error_handlers
 from codepulse.api.security import AuthorizedKey, require_api_key
-from codepulse.auth import create_api_key, get_api_key_repository_ids, list_api_keys_for_repositories, revoke_api_key
+from codepulse.auth import (
+    ROLE_RANK,
+    create_api_key,
+    create_repository_owned_by,
+    get_api_key_repository_ids,
+    list_api_keys_for_repositories,
+    revoke_api_key,
+)
 from codepulse.config import get_settings
 from codepulse.embeddings.embedder import EmbeddingUnavailableError
 from codepulse.indexer.engine import IndexingEngine
@@ -333,6 +340,39 @@ def index_repository(
             ),
         )
 
+    # Phase 7.2 (roadmap §37 item 7.2; §15: "indexer (viewer + trigger
+    # indexing)"): if `req.url` already names a KNOWN repository, this
+    # call is a RE-index of something a key may already be scoped to at
+    # only "viewer" -- require at least "indexer" role for that
+    # specific repository.
+    #
+    # 2026-10-14 (FUTURE_CHANGES item 18, user-approved owner semantics): a
+    # genuinely NEW repository used to be open to ANY authenticated key, which
+    # then could not poll its own job or ever see the repository (the VS Code
+    # extension's Index Workspace on a new folder). Now creating one requires
+    # the `indexer` role (or higher) on at least one EXISTING repository, and
+    # the creating key is made `admin` of it (below).
+    #
+    # All of this is decided BEFORE the path is validated, so a key that may
+    # not index this repository cannot use the 400-vs-403 difference to probe
+    # which paths exist on the host.
+    _session = storage_manager.get_session()
+    try:
+        _existing_repo = _session.query(RepositoryModel).filter(RepositoryModel.url == req.url).first()
+        _existing_repo_id = _existing_repo.id if _existing_repo else None
+    finally:
+        _session.close()
+    if _existing_repo_id is not None:
+        auth.authorize_role(_existing_repo_id, "indexer")
+    elif not any(ROLE_RANK.get(role, -1) >= ROLE_RANK["indexer"] for role in auth.repository_roles.values()):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Creating a new repository requires the 'indexer' role (or higher) on at "
+                "least one existing repository."
+            ),
+        )
+
     # Phase 1.5 / roadmap §15: local-path ingestion safety -- allow-list
     # containment + `..`-traversal/symlink-escape rejection. See
     # codepulse.ingestion_safety.validate_local_path's docstring; an empty
@@ -343,38 +383,25 @@ def index_repository(
     except IngestionSafetyError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Phase 7.2 (roadmap §37 item 7.2; §15: "indexer (viewer + trigger
-    # indexing)"): if `req.url` already names a KNOWN repository, this
-    # call is a RE-index of something a key may already be scoped to at
-    # only "viewer" -- require at least "indexer" role for that
-    # specific repository. A genuinely NEW repository has no existing
-    # grant for anyone to check against, so it remains open to any
-    # authenticated key, exactly matching this endpoint's own
-    # pre-existing, still-accurate rationale a few lines below (Phase
-    # 1.2: no repository scope exists yet to check a not-yet-indexed
-    # path against).
-    _session = storage_manager.get_session()
-    try:
-        _existing_repo = _session.query(RepositoryModel).filter(RepositoryModel.url == req.url).first()
-        _existing_repo_id = _existing_repo.id if _existing_repo else None
-    finally:
-        _session.close()
-    if _existing_repo_id is not None:
-        auth.authorize_role(_existing_repo_id, "indexer")
-
     repo_name = os.path.basename(req.url)
-    # Phase 1.3: resolve (or create) the real repository id up front, via
-    # the exact same natural-key resolution IndexingEngine.index_directory
-    # itself uses internally (repo_url=req.url below is truthy, so
-    # index_directory resolves to this same url too -- see
-    # IndexingEngine._resolve_repo_id's docstring). Needed so the new
-    # IndexJob row can be linked to a real repository id, and so the
+    # Phase 1.3: resolve (or create) the real repository id up front, so the
+    # new IndexJob row can be linked to a real repository id and the
     # one-active-job-per-repository check below has something to check
     # against, before indexing itself has actually run. Deliberately still
-    # keyed on req.url (not resolved_path) -- unchanged natural-key
-    # identity from Phase 1.3; only the actual filesystem walk below uses
-    # the safety-verified, canonicalized resolved_path.
-    repo_id = indexing_engine._resolve_repo_id(repo_name, req.url)
+    # keyed on req.url (not resolved_path) -- unchanged natural-key identity
+    # from Phase 1.3; only the actual filesystem walk below uses the
+    # safety-verified, canonicalized resolved_path.
+    if _existing_repo_id is not None:
+        repo_id = _existing_repo_id
+    else:
+        # The row and the creator's admin grant are written in one
+        # transaction, and only the call that actually creates the
+        # repository becomes its owner.
+        repo_id, created = create_repository_owned_by(storage_manager, repo_name, req.url, auth.api_key_id)
+        if not created:
+            # Another request created this url first: no grant here; apply
+            # the normal existing-repository role check.
+            auth.authorize_role(repo_id, "indexer")
 
     # Phase 1.3 / roadmap §8: "one active job per repository (advisory
     # lock on repo_id) to avoid concurrent conflicting writes." See

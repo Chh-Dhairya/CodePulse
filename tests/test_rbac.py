@@ -185,15 +185,20 @@ def test_indexer_role_key_can_reindex_an_existing_repository(client, isolated_ap
     assert response.status_code == 202
 
 
-def test_any_authenticated_key_can_still_create_a_brand_new_repository(client, isolated_app, tmp_path):
-    """No existing grant to check for a genuinely new repository -- this
-    remains open to any authenticated key, unchanged (Phase 1.2's own
-    pre-existing, still-valid rationale)."""
+def test_a_key_with_no_grants_can_no_longer_create_a_brand_new_repository(client, isolated_app, tmp_path):
+    """2026-10-14 (FUTURE_CHANGES item 18, user-approved): this test used to
+    be `test_any_authenticated_key_can_still_create_a_brand_new_repository`
+    and asserted that creating a repository stayed open to ANY authenticated
+    key (Phase 1.2's rationale: no grant existed to check a not-yet-indexed
+    path against). That left the creating key unable to poll its own job or
+    see the repository, and let a viewer-only key create repositories.
+    Creating one now needs `indexer` (or higher) on an existing repository;
+    the full rule is tested in test_repository_creation_authorization.py."""
     repo_path = str(tmp_path / "brand_new_repo")
     os.makedirs(repo_path, exist_ok=True)
     headers = make_api_key_headers(isolated_app, repository_ids=[])
     response = client.post("/v1/repositories/index", json={"url": repo_path}, headers=headers)
-    assert response.status_code == 202
+    assert response.status_code == 403
 
 
 def test_viewer_role_key_can_still_perform_read_operations(client, isolated_app):

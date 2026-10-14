@@ -35,7 +35,7 @@ from codepulse.api.app import app
 from codepulse.jobs import create_job
 from codepulse.observability import REGISTRY
 from codepulse.storage.db import RepositoryModel
-from tests.conftest import make_api_key_headers
+from tests.conftest import make_api_key_headers, make_creator_headers
 
 
 @pytest.fixture
@@ -156,7 +156,7 @@ def test_search_with_zero_results_increments_search_zero_result_total(client, is
 
 def test_indexing_job_transitions_increment_indexing_jobs_total(client, isolated_app, tmp_path):
     repo_dir = _make_repo_dir(tmp_path, "repo_metrics_index")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     before_running = _metric_value("indexing_jobs_total", {"status": "running"})
     before_succeeded = _metric_value("indexing_jobs_total", {"status": "succeeded"})

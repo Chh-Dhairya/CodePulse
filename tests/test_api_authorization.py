@@ -46,7 +46,7 @@ from fastapi.testclient import TestClient
 from codepulse.api.app import app
 from codepulse.auth import create_api_key
 from codepulse.storage.db import APIKeyModel, FileModel, RepositoryModel, SymbolModel
-from tests.conftest import make_api_key_headers
+from tests.conftest import make_api_key_headers, make_creator_headers
 
 
 @pytest.fixture
@@ -319,8 +319,13 @@ def test_feedback_succeeds_with_an_unscoped_key(client, isolated_app):
     assert response.status_code == 200
 
 
-def test_index_repository_succeeds_with_an_unscoped_key(client, isolated_app, tmp_path):
-    headers = make_api_key_headers(isolated_app)
+def test_index_repository_succeeds_with_a_key_that_may_create_repositories(client, isolated_app, tmp_path):
+    """2026-10-14 (FUTURE_CHANGES item 18, user-approved): this test used to
+    be `..._succeeds_with_an_unscoped_key` and asserted that a key with NO
+    grants could create a repository. Creating one now needs `indexer` (or
+    higher) on an existing repository; a key with no grants gets 403 (see
+    test_repository_creation_authorization.py)."""
+    headers = make_creator_headers(isolated_app)
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
 
@@ -328,6 +333,17 @@ def test_index_repository_succeeds_with_an_unscoped_key(client, isolated_app, tm
         "/v1/repositories/index", json={"url": str(empty_dir)}, headers=headers
     )
     assert response.status_code == 202
+
+
+def test_index_repository_is_forbidden_for_an_unscoped_key(client, isolated_app, tmp_path):
+    headers = make_api_key_headers(isolated_app)  # valid key, no grants
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+
+    response = client.post(
+        "/v1/repositories/index", json={"url": str(empty_dir)}, headers=headers
+    )
+    assert response.status_code == 403
 
 
 def test_index_repository_rejected_without_any_key(client, isolated_app, tmp_path):

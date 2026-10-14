@@ -31,7 +31,7 @@ from fastapi.testclient import TestClient
 from codepulse.api.app import app
 from codepulse.config import CodePulseConfig, reset_settings, set_settings
 from codepulse.rate_limit import reset_limiter
-from tests.conftest import make_api_key_headers
+from tests.conftest import make_api_key_headers, make_creator_headers
 
 
 @pytest.fixture
@@ -223,7 +223,7 @@ def test_400_bad_request_uses_the_structured_envelope(client, isolated_app, tmp_
 
     set_settings(CodePulseConfig(ingestion_allowed_roots=[str(allowed_root)]))
     try:
-        headers = make_api_key_headers(isolated_app)
+        headers = make_creator_headers(isolated_app)
         response = client.post(
             "/v1/repositories/index", json={"url": str(outside_repo)}, headers=headers
         )

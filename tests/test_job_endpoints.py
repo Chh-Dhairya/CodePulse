@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from codepulse.api.app import app
 from codepulse.jobs import create_job
 from codepulse.storage.db import RepositoryModel
-from tests.conftest import make_api_key_headers
+from tests.conftest import make_api_key_headers, make_creator_headers
 
 
 @pytest.fixture
@@ -45,7 +45,7 @@ def _make_repo_dir(tmp_path, name: str, files: dict[str, str] | None = None):
 
 def test_index_repository_returns_a_real_job_id_and_repository_id(client, isolated_app, tmp_path):
     repo_dir = _make_repo_dir(tmp_path, "repo1")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     assert response.status_code == 202
@@ -74,7 +74,7 @@ def test_job_id_from_index_response_is_pollable_to_real_completion(client, isola
     polls, the job has already run to completion for real.
     """
     repo_dir = _make_repo_dir(tmp_path, "repo1", {"a.py": "def foo():\n    return 1\n"})
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
@@ -114,7 +114,7 @@ def test_job_status_reflects_a_real_failure(client, isolated_app, tmp_path, monk
     monkeypatch.setattr(app_module.indexing_engine, "index_directory", boom)
 
     repo_dir = _make_repo_dir(tmp_path, "repo1")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
@@ -203,7 +203,7 @@ def test_index_repository_succeeds_again_once_the_prior_job_is_terminal(client, 
 
 def test_get_job_status_rejected_without_any_key(client, isolated_app, tmp_path):
     repo_dir = _make_repo_dir(tmp_path, "repo1")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
 
@@ -215,7 +215,7 @@ def test_get_job_status_forbidden_for_a_key_scoped_to_a_different_repository(cli
     repo_a = _make_repo_dir(tmp_path, "repo-a")
     repo_b = _make_repo_dir(tmp_path, "repo-b")
 
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
     post_a = client.post("/v1/repositories/index", json={"url": str(repo_a)}, headers=headers)
     job_id_a = post_a.json()["job_id"]
 
@@ -230,7 +230,7 @@ def test_get_job_status_forbidden_for_a_key_scoped_to_a_different_repository(cli
 
 def test_get_job_status_succeeds_for_a_correctly_scoped_key(client, isolated_app, tmp_path):
     repo_dir = _make_repo_dir(tmp_path, "repo1")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
     repo_id = post_response.json()["repository_id"]
@@ -255,7 +255,7 @@ def test_get_job_status_returns_404_for_a_malformed_job_id(client, isolated_app)
 def test_get_job_status_accepts_a_bare_integer_id(client, isolated_app, tmp_path):
     """GET /v1/jobs/{job_id} accepts both the "job_<n>" form and a bare integer."""
     repo_dir = _make_repo_dir(tmp_path, "repo1")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
     repo_id = post_response.json()["repository_id"]

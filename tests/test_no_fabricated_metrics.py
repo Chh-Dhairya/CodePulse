@@ -46,7 +46,7 @@ from fastapi.testclient import TestClient
 from codepulse.api.app import app
 from codepulse.config import reset_settings
 from codepulse.storage.db import RepositoryModel
-from tests.conftest import make_api_key_headers
+from tests.conftest import make_api_key_headers, make_creator_headers
 
 
 @pytest.fixture(autouse=True)
@@ -116,7 +116,7 @@ def test_index_repository_response_has_no_fabricated_duration_estimate(isolated_
     unscoped key suffices.
     """
     client = TestClient(app)
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     empty_repo_dir = tmp_path / "empty_repo"
     empty_repo_dir.mkdir()

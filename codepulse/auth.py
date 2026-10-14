@@ -41,6 +41,8 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
 from codepulse.storage.db import APIKeyModel, APIKeyRepositoryModel, RepositoryModel, StorageManager
 
 API_KEY_PREFIX = "cpk_"
@@ -268,6 +270,46 @@ def list_api_keys_for_repositories(storage: StorageManager, repository_ids: set[
             )
             for k in keys
         ]
+    finally:
+        session.close()
+
+
+def create_repository_owned_by(
+    storage: StorageManager, repo_name: str, repo_url: str, api_key_id: int
+) -> tuple[int, bool]:
+    """
+    Creates the repository row for `repo_url` AND the creating key's `admin`
+    grant on it in ONE transaction, and returns `(repository_id, created)`.
+
+    Owner semantics (CODEPULSE_FUTURE_CHANGES.md item 18, user-approved): a
+    key that creates a new repository must be able to follow its own indexing
+    job and see the result, which needs a grant on it. Only the call that
+    actually CREATES the row gets the grant: if the repository already exists
+    (including when another request created it a moment earlier and this one
+    lost the race on the unique `url`), `created` is False and NO grant is
+    written, so a second key never inherits admin on someone else's
+    repository. Callers decide who may create (the `indexer`-somewhere rule
+    lives at the endpoint); this function only makes creation and ownership
+    atomic.
+    """
+    session = storage.get_session()
+    try:
+        existing = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+        if existing is not None:
+            return existing.id, False
+        repo = RepositoryModel(name=repo_name, url=repo_url, file_count=0, symbol_count=0)
+        session.add(repo)
+        session.flush()
+        session.add(APIKeyRepositoryModel(api_key_id=api_key_id, repo_id=repo.id, role="admin"))
+        session.commit()
+        return repo.id, True
+    except IntegrityError:
+        # Lost a race to create the same url: the other request owns it.
+        session.rollback()
+        existing = session.query(RepositoryModel).filter(RepositoryModel.url == repo_url).first()
+        if existing is None:
+            raise
+        return existing.id, False
     finally:
         session.close()
 

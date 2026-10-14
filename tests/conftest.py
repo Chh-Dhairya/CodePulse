@@ -35,7 +35,7 @@ import codepulse.api.app as app_module
 from codepulse.auth import create_api_key
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.rate_limit import reset_limiter
-from codepulse.storage.db import StorageManager
+from codepulse.storage.db import RepositoryModel, StorageManager
 
 
 @pytest.fixture(autouse=True)
@@ -82,3 +82,30 @@ def make_api_key_headers(
     """
     created = create_api_key(storage, name=name, repository_ids=repository_ids, role=role)
     return {"X-API-Key": created.raw_key}
+
+
+def make_creator_headers(storage: StorageManager, *, name: str = "creator-key") -> dict[str, str]:
+    """
+    Headers for a key that MAY create new repositories: `indexer` on an
+    existing (seeded, never indexed) anchor repository.
+
+    Creating a brand-new repository through `POST /v1/repositories/index` used
+    to be open to any key, including one with no grants. Since
+    FUTURE_CHANGES item 18 (2026-10-14) it needs `indexer` (or higher) on at
+    least one existing repository, and the creator becomes `admin` of what it
+    creates. Tests that merely need to create a repository use this instead
+    of an unscoped key; tests about the rule itself are in
+    test_repository_creation_authorization.py.
+    """
+    import uuid
+
+    session = storage.get_session()
+    try:
+        anchor = RepositoryModel(name="anchor", url=f"file:///anchor/{uuid.uuid4().hex}")
+        session.add(anchor)
+        session.commit()
+        anchor_id = anchor.id
+    finally:
+        session.close()
+    return make_api_key_headers(storage, repository_ids=[anchor_id], name=name, role="indexer")
+

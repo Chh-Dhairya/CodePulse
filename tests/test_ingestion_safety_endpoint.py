@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient
 
 from codepulse.api.app import app
 from codepulse.config import CodePulseConfig, reset_settings, set_settings
-from tests.conftest import make_api_key_headers
+from tests.conftest import make_api_key_headers, make_creator_headers
 
 
 @pytest.fixture
@@ -66,7 +66,12 @@ def _make_repo_dir(tmp_path, name: str, files: dict[str, str] | None = None):
 def test_nonexistent_local_path_is_rejected_and_creates_no_repository(client, isolated_app, tmp_path):
     from codepulse.storage.db import RepositoryModel
 
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)  # may create repositories (owns a seeded anchor repository)
+    session = isolated_app.get_session()
+    try:
+        before = session.query(RepositoryModel).count()
+    finally:
+        session.close()
     response = client.post(
         "/v1/repositories/index",
         json={"source": "local", "url": str(tmp_path / "does_not_exist")},
@@ -77,7 +82,7 @@ def test_nonexistent_local_path_is_rejected_and_creates_no_repository(client, is
 
     session = isolated_app.get_session()
     try:
-        assert session.query(RepositoryModel).count() == 0, "a rejected request must not leave a phantom repository behind"
+        assert session.query(RepositoryModel).count() == before, "a rejected request must not leave a phantom repository behind"
     finally:
         session.close()
 
@@ -132,7 +137,7 @@ def test_local_path_outside_configured_allow_list_is_rejected(client, isolated_a
     outside_repo = _make_repo_dir(tmp_path, "outside_repo")
 
     set_settings(CodePulseConfig(ingestion_allowed_roots=[str(allowed_root)]))
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     response = client.post(
         "/v1/repositories/index", json={"url": str(outside_repo)}, headers=headers
@@ -147,7 +152,7 @@ def test_local_path_inside_configured_allow_list_succeeds(client, isolated_app, 
     inside_repo.mkdir()
 
     set_settings(CodePulseConfig(ingestion_allowed_roots=[str(allowed_root)]))
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     response = client.post(
         "/v1/repositories/index", json={"url": str(inside_repo)}, headers=headers
@@ -159,7 +164,7 @@ def test_local_path_unrestricted_by_default(client, isolated_app, tmp_path):
     """No ingestion_allowed_roots configured -- any real path is permitted,
     preserving the local-first zero-configuration experience."""
     repo_dir = _make_repo_dir(tmp_path, "anywhere")
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     assert response.status_code == 202
@@ -172,7 +177,7 @@ def test_file_count_exceeding_cap_fails_the_job(client, isolated_app, tmp_path):
         tmp_path, "big_repo", {"a.py": "x = 1\n", "b.py": "x = 2\n", "c.py": "x = 3\n"}
     )
     set_settings(CodePulseConfig(ingestion_max_files_per_repo=2))
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     assert post_response.status_code == 202
@@ -191,7 +196,7 @@ def test_file_count_exceeding_cap_fails_the_job(client, isolated_app, tmp_path):
 def test_file_count_within_cap_succeeds(client, isolated_app, tmp_path):
     repo_dir = _make_repo_dir(tmp_path, "small_repo", {"a.py": "x = 1\n"})
     set_settings(CodePulseConfig(ingestion_max_files_per_repo=10))
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
@@ -213,7 +218,7 @@ def test_file_count_exactly_at_the_cap_succeeds(client, isolated_app, tmp_path):
         tmp_path, "exact_repo", {"a.py": "x = 1\n", "b.py": "x = 2\n"}
     )
     set_settings(CodePulseConfig(ingestion_max_files_per_repo=2))  # exactly 2 files exist
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
@@ -234,7 +239,7 @@ def test_oversized_file_is_skipped_but_the_job_still_succeeds(client, isolated_a
         tmp_path, "mixed_repo", {"small.py": small_content, "large.py": large_content}
     )
     set_settings(CodePulseConfig(ingestion_max_file_size_bytes=len(small_content) + 10))
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]
@@ -266,7 +271,7 @@ def test_file_exactly_at_the_size_cap_is_not_skipped(client, isolated_app, tmp_p
     real_size_on_disk = os.path.getsize(repo_dir / "a.py")
 
     set_settings(CodePulseConfig(ingestion_max_file_size_bytes=real_size_on_disk))
-    headers = make_api_key_headers(isolated_app)
+    headers = make_creator_headers(isolated_app)
 
     post_response = client.post("/v1/repositories/index", json={"url": str(repo_dir)}, headers=headers)
     job_id = post_response.json()["job_id"]

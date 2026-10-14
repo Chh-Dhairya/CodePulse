@@ -67,7 +67,7 @@ key = create_api_key(StorageManager(db_url='sqlite:///codepulse.db'), 'first-adm
 print(key.raw_key)"
 ```
 
-The raw key is shown once and only its hash is stored. `repository_ids` must reference an existing repository, so index something first. Further keys come from `POST /v1/admin/keys`.
+The raw key is shown once and only its hash is stored. `repository_ids` must reference an existing repository, so index something first. Further keys come from `POST /v1/admin/keys`. A key can index a new repository only if it already holds the `indexer` role (or higher) on some existing repository; the key that creates a repository becomes its `admin`, so it can follow the indexing job and see the result.
 
 Main endpoints: `POST /v1/search`, `POST /v1/repositories/index`, `GET /v1/repositories/{id}/index-status`, `GET /v1/symbols/{id}`, `POST /v1/symbols/{id}/impact-analysis`, `POST /v1/symbols/{id}/similar`, `GET /v1/symbols/{id}/references`, `POST /v1/agent/context`. Errors always use one shape: `{"error": {"code", "message", "details"}}`. Requests are rate-limited per key (5 req/s, burst 20, configurable).
 
