@@ -39,6 +39,10 @@ from codepulse.storage.db import (
 logger = logging.getLogger(__name__)
 
 
+class IndexingPersistenceError(RuntimeError):
+    """Saving an index run to the database failed, so the run did not happen as far as the database is concerned."""
+
+
 @dataclass(frozen=True)
 class IncrementalPlan:
     """
@@ -1245,17 +1249,24 @@ class IndexingEngine:
         }
 
         # 6. Save to Database
-        stats = self._persist_to_db(
-            repo_name=repo_name,
-            repo_url=resolved_repo_url,
-            parsed_files=parsed_files,
-            all_symbols=all_symbols,
-            all_chunks=all_chunks,
-            chunk_embeddings=chunk_embeddings,
-            is_incremental=incremental_plan.is_incremental,
-            changed_symbol_keys=changed_symbol_keys,
-            module_snapshot=module_snapshot,
-        )
+        try:
+            stats = self._persist_to_db(
+                repo_name=repo_name,
+                repo_url=resolved_repo_url,
+                parsed_files=parsed_files,
+                all_symbols=all_symbols,
+                all_chunks=all_chunks,
+                chunk_embeddings=chunk_embeddings,
+                is_incremental=incremental_plan.is_incremental,
+                changed_symbol_keys=changed_symbol_keys,
+                module_snapshot=module_snapshot,
+            )
+        except IndexingPersistenceError:
+            # The database kept its previous state (the transaction rolled back), so put the in-memory
+            # indexes back in line with it; otherwise a running server would serve content that a
+            # restart would lose. No snapshot is recorded for a run that was not saved.
+            self._realign_memory_with_database(repo_id, resolved_repo_url)
+            raise
 
         # Phase 3.1: record this run's snapshot (commit_sha + embedding
         # config) AFTER successful persistence, whether this run was
@@ -1449,6 +1460,28 @@ class IndexingEngine:
                 relationship_type=edge.relationship_type,
             ))
 
+    def _realign_memory_with_database(self, repo_id: int, repo_url: str) -> None:
+        """
+        Drops everything this process holds in memory for `repo_id` and restores it from the database, so
+        memory and durable state agree again after a run that could not be saved. This is the same restore
+        a restart performs (keyword and vector indexes, symbol map, call graph, module graph); the parse
+        cache is dropped too, so the next run cannot build on content that was never saved.
+        """
+        self.bm25_index.remove_repo(repo_id)
+        self.vector_index.remove_repo(repo_id)
+        for doc_id in [d for d, r in self.symbol_repo_map.items() if r == repo_id]:
+            self.symbols_by_id.pop(doc_id, None)
+            self.symbol_repo_map.pop(doc_id, None)
+        prefix = f"{repo_id}::"
+        for key in [k for k in self.parse_results if k.startswith(prefix)]:
+            self.parse_results.pop(key, None)
+        dropped = self.call_graphs.pop(repo_id, None)
+        if dropped is not None and self.call_graph is dropped:
+            self.call_graph = None
+        self._restored_call_graph_repo_ids.discard(repo_id)
+        self._restored_module_graphs.pop(repo_id, None)
+        self.hydrate_repository(repo_url)
+
     def _module_edges_table_exists(self, session) -> bool:
         """
         False on a database that has not been migrated to the revision that
@@ -1458,7 +1491,11 @@ class IndexingEngine:
         keeps indexing exactly as before and only lacks the restart-proof
         module structure -- logged once, never silent.
         """
-        if sa_inspect(session.get_bind()).has_table("module_edges"):
+        # Through the session's OWN connection. Inspecting `session.get_bind()` (the engine) opens a
+        # SEPARATE connection, which SQLite refuses ("database is locked") once the surrounding write
+        # transaction has grown past its page cache and spilled -- i.e. on any real-sized repository,
+        # which made the whole save fail (found by the 2026-10-15 publication audit).
+        if sa_inspect(session.connection()).has_table("module_edges"):
             return True
         if not self._warned_module_edges_missing:
             self._warned_module_edges_missing = True
@@ -1816,7 +1853,9 @@ class IndexingEngine:
         except Exception as e:
             session.rollback()
             logger.error("Database save failed: %s", e)
-            return {"error": str(e)}
+            # Used to `return {"error": ...}`, which index_directory ignored: it went on to record a
+            # snapshot and report success for data that was never saved (2026-10-15 audit).
+            raise IndexingPersistenceError(f"saving the index to the database failed: {e}") from e
         finally:
             session.close()
 

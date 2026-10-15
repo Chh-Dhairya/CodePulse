@@ -923,6 +923,22 @@ def main() -> None:
                 if warning:
                     _stderr_console.print(f"[yellow]⚠ {warning}[/yellow]")
 
+    try:
+        _dispatch(args)
+    except Exception as exc:
+        from codepulse.indexer.engine import IndexingPersistenceError
+
+        if not isinstance(exc, IndexingPersistenceError):
+            raise
+        message = f"{exc}. Nothing from this run was saved; the database is unchanged."
+        if getattr(args, "json", False):
+            _print_json({"error": "indexing_failed", "message": message})
+        else:
+            _stderr_console.print(f"[bold red]Error:[/bold red] {message}")
+        sys.exit(1)
+
+
+def _dispatch(args: argparse.Namespace) -> None:
     if args.command == "parse":
         cmd_parse(args)
     elif args.command == "search":
