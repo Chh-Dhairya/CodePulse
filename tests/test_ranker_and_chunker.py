@@ -154,7 +154,10 @@ def test_fuse_rrf_empty_inputs_returns_empty_list():
 def test_fuse_deterministic_behavior_unaffected_by_rrf_refactor():
     """Regression guard: fuse()'s own behavior must be byte-for-byte
     unchanged now that it shares _build_result_item with fuse_rrf()."""
-    ranker = HybridRanker(weight_keyword=0.4, weight_vector=0.4, weight_graph=0.2, exact_match_boost=0.15)
+    # `vector_floor_rank=0` is the original absolute scaling of the semantic score, which is what this
+    # test pins byte-for-byte. The default now scales the semantic score relative to the query's own
+    # results (FUTURE_CHANGES item 20, part 2); that arithmetic is pinned in test_vector_score_scaling.py.
+    ranker = HybridRanker(weight_keyword=0.4, weight_vector=0.4, weight_graph=0.2, exact_match_boost=0.15, vector_floor_rank=0)
     bm25_res = [{"doc_id": "doc1", "normalized_score": 0.9, "metadata": {"symbol_name": "create_db", "file_path": "db.py"}}]
     vector_res = [{"doc_id": "doc1", "relevance_score": 0.85, "embedding_distance": 0.15, "metadata": {"symbol_name": "create_db", "file_path": "db.py"}}]
 

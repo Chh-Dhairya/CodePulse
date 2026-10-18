@@ -1,0 +1,194 @@
+{
+  "description": "Paraphrase relevance queries over the installed `pathspec` package (a second codebase, so ranking changes are not judged only on CodePulse's own source). Role: HELD-OUT set (not consulted while choosing settings; evaluated once at the end). Queries were written from reading each symbol's code, BEFORE any search result was looked at, and deliberately do not reuse docstring wording.",
+  "source_repository": "the installed `pathspec` package directory (site-packages/pathspec); version pinned by CodePulse's dependency ranges",
+  "expected_file_path_convention": "relative to the pathspec/ package directory",
+  "count": 31,
+  "pairs": [
+    {
+      "query": "object that tests file paths against a list of ignore patterns",
+      "expected_file_path": "pathspec.py",
+      "expected_symbol_name": "PathSpec",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "work out which of many files are covered by the patterns",
+      "expected_file_path": "pathspec.py",
+      "expected_symbol_name": "match_files",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "walk a directory tree and return the files that match",
+      "expected_file_path": "pathspec.py",
+      "expected_symbol_name": "match_tree_files",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "mimic how git decides which files to ignore",
+      "expected_file_path": "gitignore.py",
+      "expected_symbol_name": "GitIgnoreSpec",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "backslash escape characters that are special in ignore patterns",
+      "expected_file_path": "patterns/gitignore/base.py",
+      "expected_symbol_name": "escape",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "convert windows style backslash paths to forward slashes",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "normalize_file",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "report which specific pattern caused a file to match",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "detailed_match_files",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "register a new pattern type under a name",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "register_pattern",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "find a pattern factory that was registered under a name",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "lookup_pattern",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "error when the same pattern name is registered twice",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "AlreadyRegisteredError",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "error raised when a symlink loop is found while walking folders",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "RecursionError",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "recursively list every file and folder under a directory",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "iter_tree_entries",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "filesystem entry that remembers its stat information",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "TreeEntry",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "result record telling whether a file was included and by which pattern",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "CheckResult",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "exception for a malformed gitignore line",
+      "expected_file_path": "patterns/gitignore/base.py",
+      "expected_symbol_name": "GitIgnorePatternError",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "add a trailing slash to paths that are directories",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "append_dir_sep",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "create the engine that compiles patterns for gitignore matching",
+      "expected_file_path": "_backends/agg.py",
+      "expected_symbol_name": "make_gitignore_backend",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "mark a function as obsolete so callers get a warning",
+      "expected_file_path": "_typing.py",
+      "expected_symbol_name": "deprecated",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "guard for code that should never be reached",
+      "expected_file_path": "_typing.py",
+      "expected_symbol_name": "assert_unreachable",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "gitignore matcher built on the hyperscan library",
+      "expected_file_path": "_backends/hyperscan/gitignore.py",
+      "expected_symbol_name": "HyperscanGiBackend",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "gitignore matcher built on google's re2 engine",
+      "expected_file_path": "_backends/re2/gitignore.py",
+      "expected_symbol_name": "Re2GiBackend",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "default pure python engine for gitignore matching",
+      "expected_file_path": "_backends/simple/gitignore.py",
+      "expected_symbol_name": "SimpleGiBackend",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "record describing where in the text a regex matched",
+      "expected_file_path": "pattern.py",
+      "expected_symbol_name": "RegexMatchResult",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "go through the patterns together with their positions",
+      "expected_file_path": "_backends/_utils.py",
+      "expected_symbol_name": "enumerate_patterns",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "tell whether a directory entry is a symbolic link",
+      "expected_file_path": "util.py",
+      "expected_symbol_name": "is_symlink",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "pattern that keeps a compiled regular expression",
+      "expected_file_path": "pattern.py",
+      "expected_symbol_name": "RegexPattern",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "test several files at once and get one verdict per file",
+      "expected_file_path": "pathspec.py",
+      "expected_symbol_name": "check_files",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "walk a folder and give each file's verdict against the spec",
+      "expected_file_path": "pathspec.py",
+      "expected_symbol_name": "check_tree_files",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "the newer gitignore pattern class with fuller git compatibility",
+      "expected_file_path": "patterns/gitignore/spec.py",
+      "expected_symbol_name": "GitIgnoreSpecPattern",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "simpler gitignore pattern class",
+      "expected_file_path": "patterns/gitignore/basic.py",
+      "expected_symbol_name": "GitIgnoreBasicPattern",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "old wildmatch pattern class kept for backward compatibility",
+      "expected_file_path": "patterns/gitwildmatch.py",
+      "expected_symbol_name": "GitWildMatchPattern",
+      "source": "hand_curated_external"
+    }
+  ]
+}

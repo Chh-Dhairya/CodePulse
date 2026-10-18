@@ -58,7 +58,9 @@ class _HasFilePathAndSymbolName(Protocol):
     symbol_name: str
 
 
-def load_relevance_dataset(path: str | Path | None = None) -> list[RelevancePair]:
+def load_relevance_dataset(
+    path: str | Path | None = None, size_band: tuple[int, int] = (100, 300)
+) -> list[RelevancePair]:
     """
     Loads the curated relevance dataset (default:
     `tests/relevance/dataset.json`, this milestone's own curated,
@@ -67,6 +69,9 @@ def load_relevance_dataset(path: str | Path | None = None) -> list[RelevancePair
     Raises `ValueError` if the loaded dataset falls outside the roadmap's
     explicit ~100-300 pair size band (§20) -- a real, structural
     validation of the dataset's own health, not a fabricated pass.
+    `size_band` is that band; the smaller per-codebase external datasets
+    (tests/relevance/external_*.json, added for FUTURE_CHANGES item 20)
+    pass their own, narrower expectation.
     """
     dataset_path = Path(path) if path is not None else DEFAULT_DATASET_PATH
     with open(dataset_path, "r", encoding="utf-8") as f:
@@ -83,10 +88,12 @@ def load_relevance_dataset(path: str | Path | None = None) -> list[RelevancePair
         for p in pairs_raw
     ]
 
-    if not (100 <= len(pairs) <= 300):
+    low, high = size_band
+    if not (low <= len(pairs) <= high):
         raise ValueError(
             f"Relevance dataset at {dataset_path} has {len(pairs)} pairs, outside "
-            f"the roadmap's explicit ~100-300 pair band (§20) -- the dataset file "
+            f"the expected {low}-{high} pair band (the roadmap's band for the main dataset is "
+            f"~100-300, §20) -- the dataset file "
             f"itself is malformed/truncated, not merely a low score."
         )
     return pairs

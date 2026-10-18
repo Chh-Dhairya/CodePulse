@@ -83,6 +83,24 @@ class CodePulseConfig(BaseModel):
             "config/env for a given workload."
         ),
     )
+    vector_floor_rank: int = Field(
+        default=20,
+        ge=0,
+        description=(
+            "How the semantic score is scaled before hybrid fusion. The "
+            "lexical score is relative (the best keyword hit is always 1.0) "
+            "but a raw cosine similarity is absolute and sits in a narrow "
+            "band, so the two were weighted as if on one scale. The vector "
+            "score is now (sim - floor) / (top - floor), clipped to 0..1, "
+            "where top is the best similarity for the query and floor is the "
+            "similarity of the hit at this rank. It does not depend on how "
+            "many hits were fetched beyond this rank, so scores never change "
+            "with the requested limit. 0 restores the old absolute "
+            "(cosine + 1) / 2 scaling. 20 was chosen on paraphrase queries "
+            "over two codebases (FUTURE_CHANGES item 20); not a universal "
+            "constant."
+        ),
+    )
 
     # Server / API Settings
     server_host: str = Field(
@@ -280,6 +298,7 @@ def _normalize_toml_dict(raw: dict[str, Any]) -> dict[str, Any]:
             "bm25_k1",
             "bm25_b",
             "rrf_k",
+            "vector_floor_rank",
         ):
             if key in search:
                 normalized[key] = search[key]
@@ -315,6 +334,7 @@ _ENV_VAR_MAPPINGS: dict[str, str] = {
     "CODEPULSE_BM25_K1": "bm25_k1",
     "CODEPULSE_BM25_B": "bm25_b",
     "CODEPULSE_RRF_K": "rrf_k",
+    "CODEPULSE_VECTOR_FLOOR_RANK": "vector_floor_rank",
     "CODEPULSE_SERVER_HOST": "server_host",
     "CODEPULSE_HOST": "server_host",
     "CODEPULSE_SERVER_PORT": "server_port",

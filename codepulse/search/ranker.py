@@ -77,6 +77,7 @@ class HybridRanker:
         weight_graph: float | None = None,
         exact_match_boost: float | None = None,
         rrf_k: int | None = None,
+        vector_floor_rank: int | None = None,
     ) -> None:
         from codepulse.config import get_settings
         settings = get_settings()
@@ -91,6 +92,54 @@ class HybridRanker:
         # every other tunable ranking parameter above, rather than read
         # fresh from settings on every fuse_rrf() call.
         self.rrf_k = rrf_k if rrf_k is not None else settings.rrf_k
+        self.vector_floor_rank = (
+            vector_floor_rank if vector_floor_rank is not None else settings.vector_floor_rank
+        )
+
+    def _vector_scores_for_fusion(self, vector_results: list[dict[str, Any]]) -> dict[str, float]:
+        """
+        The semantic score each vector candidate contributes to weighted fusion
+        (FUTURE_CHANGES item 20, part 2).
+
+        The lexical score is relative to the query's best keyword hit; a raw
+        cosine similarity is absolute and, for real code, sits in a narrow band
+        (the old `(cosine + 1) / 2` lived in roughly 0.5..0.9), so weighting the
+        two 0.4 / 0.4 compressed the semantic signal. Here the score is
+        `(sim - floor) / (top - floor)` clipped to 0..1: `top` is the best
+        similarity for this query, `floor` the similarity of the hit at
+        `vector_floor_rank`. Hits ranked below the floor therefore never change
+        anyone's score, so a result scores the same whatever `limit` was asked
+        for, and input order is irrelevant. With no spread (a single candidate,
+        or all equal) every candidate with positive similarity scores 1.0
+        rather than being zeroed. `vector_floor_rank == 0` is the old absolute
+        scaling. The value REPORTED on a result (`vector_score`) is always the
+        real, unscaled one; only the fusion input is scaled.
+        """
+        if self.vector_floor_rank <= 0:
+            return {it["doc_id"]: it.get("relevance_score", 0.0) for it in vector_results}
+
+        def sim_of(it: dict[str, Any]) -> float:
+            sim = it.get("similarity")
+            if sim is None:
+                sim = 2.0 * it.get("relevance_score", 0.5) - 1.0
+            return max(0.0, sim)
+
+        sims = sorted((sim_of(it) for it in vector_results), reverse=True)
+        if not sims:
+            return {}
+        top = sims[0]
+        floor = sims[min(self.vector_floor_rank, len(sims)) - 1]
+        span = top - floor
+        scaled: dict[str, float] = {}
+        for it in vector_results:
+            sim = sim_of(it)
+            if top <= 0.0:
+                scaled[it["doc_id"]] = 0.0
+            elif span <= 1e-12:
+                scaled[it["doc_id"]] = 1.0
+            else:
+                scaled[it["doc_id"]] = min(1.0, max(0.0, (sim - floor) / span))
+        return scaled
 
     def _build_result_item(
         self,
@@ -138,6 +187,30 @@ class HybridRanker:
             graph_score=graph_score,
         )
 
+    def rank_by_similarity(self, vector_results: list[dict[str, Any]], top_k: int = 20) -> list[SearchResultItem]:
+        """
+        Semantic-only search: results ordered purely by vector similarity.
+
+        Nothing is fused here, so there is no keyword/graph term and no
+        exact-name boost, and the score reported is the real relevance of the
+        match. (It used to go through `fuse()`: the score became
+        `0.4 x relevance + 0.15 boost`, a narrow 0.2-0.36 band in which a
+        name that merely appeared inside the query text jumped past much closer
+        matches; on a second codebase MRR was 0.272 against 0.551 without the
+        boost.) Ties break on `doc_id`, so the order is deterministic.
+        """
+        ordered = sorted(vector_results, key=lambda it: (-it.get("relevance_score", 0.0), it["doc_id"]))
+        return [
+            self._build_result_item(
+                it["doc_id"],
+                it.get("metadata", {}),
+                final_score=it.get("relevance_score", 0.0),
+                vector_score=it.get("relevance_score", 0.0),
+                embedding_distance=it.get("embedding_distance", 1.0),
+            )
+            for it in ordered[:top_k]
+        ]
+
     def fuse(
         self,
         query: str,
@@ -148,9 +221,12 @@ class HybridRanker:
     ) -> list[SearchResultItem]:
         """
         Fuses BM25 and Vector search results using weighted linear combination.
+        The semantic score is scaled relative to the query's own results before
+        it is weighted against the lexical score (`_vector_scores_for_fusion`).
         """
         graph_scores = graph_scores or {}
         query_lower = query.lower().strip()
+        fusion_vec_scores = self._vector_scores_for_fusion(vector_results)
 
         # Collect all unique candidate doc_ids
         candidates: dict[str, dict[str, Any]] = {}
@@ -197,7 +273,7 @@ class HybridRanker:
             # Compute weighted combination
             combined = (
                 self.weight_keyword * kw_score
-                + self.weight_vector * vec_score
+                + self.weight_vector * fusion_vec_scores.get(doc_id, 0.0)
                 + self.weight_graph * g_score
             )
 

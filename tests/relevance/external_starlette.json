@@ -1,0 +1,266 @@
+{
+  "description": "Paraphrase relevance queries over the installed `starlette` package (a second codebase, so ranking changes are not judged only on CodePulse's own source). Role: TUNING set (used to choose ranking settings). Queries were written from reading each symbol's code, BEFORE any search result was looked at, and deliberately do not reuse docstring wording.",
+  "source_repository": "the installed `starlette` package directory (site-packages/starlette); version pinned by CodePulse's dependency ranges",
+  "expected_file_path_convention": "relative to the starlette/ package directory",
+  "count": 43,
+  "pairs": [
+    {
+      "query": "turn the cookie request header into key value pairs",
+      "expected_file_path": "requests.py",
+      "expected_symbol_name": "cookie_parser",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "run blocking synchronous code without stalling the event loop",
+      "expected_file_path": "concurrency.py",
+      "expected_symbol_name": "run_in_threadpool",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "wait until the first of several tasks finishes then cancel the rest",
+      "expected_file_path": "concurrency.py",
+      "expected_symbol_name": "run_until_first_complete",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "convert a url path template with typed placeholders into a regular expression",
+      "expected_file_path": "routing.py",
+      "expected_symbol_name": "compile_path",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "wrap an ordinary function so it works as an ASGI application handling requests",
+      "expected_file_path": "routing.py",
+      "expected_symbol_name": "request_response",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "wrap a handler that receives a websocket session so it can be mounted as an app",
+      "expected_file_path": "routing.py",
+      "expected_symbol_name": "websocket_session",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "produce an API description document covering every endpoint",
+      "expected_file_path": "schemas.py",
+      "expected_symbol_name": "get_schema",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "read yaml metadata out of a handler's documentation text",
+      "expected_file_path": "schemas.py",
+      "expected_symbol_name": "parse_docstring",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "serve files from a directory over http",
+      "expected_file_path": "staticfiles.py",
+      "expected_symbol_name": "StaticFiles",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "decide whether a conditional request can be answered with not modified",
+      "expected_file_path": "staticfiles.py",
+      "expected_symbol_name": "is_not_modified",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "work out which folders to serve assets from including ones inside installed packages",
+      "expected_file_path": "staticfiles.py",
+      "expected_symbol_name": "get_directories",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "render a jinja template into an http response",
+      "expected_file_path": "templating.py",
+      "expected_symbol_name": "TemplateResponse",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "build a WSGI environ dictionary from an ASGI scope",
+      "expected_file_path": "middleware/wsgi.py",
+      "expected_symbol_name": "build_environ",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "generate a debugging web page with the traceback when the server crashes",
+      "expected_file_path": "middleware/errors.py",
+      "expected_symbol_name": "generate_html",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "check whether a cross origin request comes from an allowed site",
+      "expected_file_path": "middleware/cors.py",
+      "expected_symbol_name": "is_allowed_origin",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "answer the browser's preflight options request for cross site calls",
+      "expected_file_path": "middleware/cors.py",
+      "expected_symbol_name": "preflight_response",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "compress outgoing responses when the client accepts it",
+      "expected_file_path": "middleware/gzip.py",
+      "expected_symbol_name": "GZipMiddleware",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "send plain http visitors to the secure version of the site",
+      "expected_file_path": "middleware/httpsredirect.py",
+      "expected_symbol_name": "HTTPSRedirectMiddleware",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "refuse requests whose host header is not on the allowed list",
+      "expected_file_path": "middleware/trustedhost.py",
+      "expected_symbol_name": "TrustedHostMiddleware",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "keep per visitor data in a signed cookie between requests",
+      "expected_file_path": "middleware/sessions.py",
+      "expected_symbol_name": "SessionMiddleware",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "simple user record that only has a username",
+      "expected_file_path": "authentication.py",
+      "expected_symbol_name": "SimpleUser",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "decorator that limits an endpoint to users holding certain permissions",
+      "expected_file_path": "authentication.py",
+      "expected_symbol_name": "requires",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "queue several jobs to run after the response has gone out",
+      "expected_file_path": "background.py",
+      "expected_symbol_name": "BackgroundTasks",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "load settings from environment variables or a dotenv file",
+      "expected_file_path": "config.py",
+      "expected_symbol_name": "Config",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "hold a value that must never show up in logs or tracebacks",
+      "expected_file_path": "datastructures.py",
+      "expected_symbol_name": "Secret",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "header collection ignoring case that can be changed",
+      "expected_file_path": "datastructures.py",
+      "expected_symbol_name": "MutableHeaders",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "parse a multipart form body including uploaded files",
+      "expected_file_path": "formparsers.py",
+      "expected_symbol_name": "MultiPartParser",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "parse a url encoded form body",
+      "expected_file_path": "formparsers.py",
+      "expected_symbol_name": "FormParser",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "uploaded file kept in memory and spilled to disk when large",
+      "expected_file_path": "datastructures.py",
+      "expected_symbol_name": "UploadFile",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "send a file from disk to the client with caching headers",
+      "expected_file_path": "responses.py",
+      "expected_symbol_name": "FileResponse",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "stream the response body from an async generator",
+      "expected_file_path": "responses.py",
+      "expected_symbol_name": "StreamingResponse",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "reply telling the client to go to a different address",
+      "expected_file_path": "responses.py",
+      "expected_symbol_name": "RedirectResponse",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "attach a cookie with expiry and flags to the outgoing response",
+      "expected_file_path": "responses.py",
+      "expected_symbol_name": "set_cookie",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "class based handler that dispatches to a method named after the http verb",
+      "expected_file_path": "endpoints.py",
+      "expected_symbol_name": "HTTPEndpoint",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "class based websocket handler with hooks for connect receive and disconnect",
+      "expected_file_path": "endpoints.py",
+      "expected_symbol_name": "WebSocketEndpoint",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "client for exercising the application in tests without any network",
+      "expected_file_path": "testclient.py",
+      "expected_symbol_name": "TestClient",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "attach a sub application under a path prefix",
+      "expected_file_path": "routing.py",
+      "expected_symbol_name": "Mount",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "route that matches on the host name of the request",
+      "expected_file_path": "routing.py",
+      "expected_symbol_name": "Host",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "exception when reverse url lookup finds no matching route",
+      "expected_file_path": "routing.py",
+      "expected_symbol_name": "NoMatchFound",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "find out whether the client has gone away",
+      "expected_file_path": "requests.py",
+      "expected_symbol_name": "is_disconnected",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "make a copy of a url with some parts swapped out",
+      "expected_file_path": "datastructures.py",
+      "expected_symbol_name": "replace",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "path parameter type that parses a uuid",
+      "expected_file_path": "convertors.py",
+      "expected_symbol_name": "UUIDConvertor",
+      "source": "hand_curated_external"
+    },
+    {
+      "query": "one time sanity check that the static directory exists",
+      "expected_file_path": "staticfiles.py",
+      "expected_symbol_name": "check_config",
+      "source": "hand_curated_external"
+    }
+  ]
+}

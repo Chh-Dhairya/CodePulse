@@ -276,8 +276,30 @@ def test_hybrid_search_relevance_meets_the_measured_baseline(indexed_codepulse_e
         for pq in misses[:15]
     )
 
-    assert result.recall_at_10 >= 0.85, (
-        f"Recall@10 regressed to {result.recall_at_10:.3f} (measured Phase 2.4 baseline: 0.9007). "
+    # Ratcheted on 2026-10-18 (FUTURE_CHANGES item 20): measured hybrid is now
+    # Recall@10 0.957 / MRR 0.874 (it was 0.872 / 0.683 before results were folded
+    # per symbol and the semantic score was put on the lexical score's scale).
+    assert result.recall_at_10 >= 0.92, (
+        f"Recall@10 regressed to {result.recall_at_10:.3f} (measured 2026-10-18: 0.957; Phase 2.4 baseline: 0.9007). "
         f"{len(misses)}/{result.num_queries} queries missed:\n{miss_summary}"
     )
-    assert result.mrr >= 0.65, f"MRR regressed to {result.mrr:.3f} (measured Phase 2.4 baseline: 0.7129)"
+    assert result.mrr >= 0.80, f"MRR regressed to {result.mrr:.3f} (measured 2026-10-18: 0.874; Phase 2.4 baseline: 0.7129)"
+
+
+def test_hybrid_search_meets_the_floor_on_the_hand_written_paraphrases_alone(indexed_codepulse_engine):
+    """100 of the 141 queries are the symbol's own docstring, which keyword search answers perfectly, so the
+    headline gate can stay green while search on realistic queries gets worse (it did: hybrid trailed semantic
+    search alone on these 41). Gate the paraphrase subset by itself.
+    Measured 2026-10-18: Recall@10 0.854 / MRR 0.644 (before the fix: 0.659 / 0.477)."""
+    engine, repo_id = indexed_codepulse_engine
+    paraphrases = [p for p in load_relevance_dataset() if p.source == "hand_curated"]
+    assert len(paraphrases) == 41
+
+    result = evaluate(
+        lambda q, limit: engine.search(q, limit=limit, search_type="hybrid", repository_id=repo_id),
+        pairs=paraphrases,
+        k=10,
+        search_limit=20,
+    )
+    assert result.recall_at_10 >= 0.80, f"paraphrase Recall@10 {result.recall_at_10:.3f} < 0.80"
+    assert result.mrr >= 0.58, f"paraphrase MRR {result.mrr:.3f} < 0.58"
