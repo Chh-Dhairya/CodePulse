@@ -123,9 +123,12 @@ Schema changes go through Alembic (`codepulse/storage/schema_migrations/`; `alem
 
 ## Project documents
 
-- `CodePulse_Strategy_and_Roadmap.md`: the authoritative strategy, architecture, and milestone plan.
-- `CODEPULSE_PROGRESS.md`: what is built and verified, milestone by milestone.
-- `CODEPULSE_FUTURE_CHANGES.md`: known limitations and planned improvements.
+- [`docs/CodePulse_Strategy_and_Roadmap.md`](docs/CodePulse_Strategy_and_Roadmap.md): the authoritative strategy, architecture, and milestone plan.
+- [`docs/CODEPULSE_PRODUCT_AND_ARCHITECTURE.md`](docs/CODEPULSE_PRODUCT_AND_ARCHITECTURE.md): what CodePulse is and how it is built, as shipped.
+- [`docs/CODEPULSE_CLIENT_STRATEGY.md`](docs/CODEPULSE_CLIENT_STRATEGY.md): the plan for the VS Code extension and other clients.
+- [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md): backing up and restoring a database.
+- [`docs/ORIGINAL_DESIGN.md`](docs/ORIGINAL_DESIGN.md): the original design, kept for history (it describes infrastructure that was never built).
+- [`docs/internal/`](docs/internal/): the working log (`CODEPULSE_PROGRESS.md`: what is built and verified, milestone by milestone) and `CODEPULSE_FUTURE_CHANGES.md` (known limitations and planned improvements).
 
 ## License
 

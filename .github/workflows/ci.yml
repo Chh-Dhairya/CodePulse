@@ -1,54 +1,117 @@
-# CodePulse CI (Phase 7.5, roadmap §37 item 7.5: "CI hook for
-# commit-triggered incremental indexing").
+# CodePulse backend CI.
 #
-# Disclosed limitation, per this project's own "verify, don't assume"
-# discipline: this workflow file has been validated for YAML syntax and
-# its own individual shell steps have been run locally in this exact
-# sequence (see CODEPULSE_PROGRESS.md's Phase 7.5 entry) -- but it has
-# NOT been observed running on GitHub's own Actions infrastructure,
-# since no CI system exists anywhere in this repository and this
-# development environment has no way to actually trigger a real GitHub
-# Actions run. This is the same category of disclosed gap as Phase
-# 6.2/6.3/7.1/7.3 (code that can be written and locally exercised, but
-# not verified against infrastructure unavailable in this environment) --
-# not silently claimed as "done and running."
+# Status, stated plainly: this workflow has been validated locally (YAML
+# syntax, and the individual commands run on Windows), but it has NOT yet been
+# observed running on GitHub Actions. The test suite has only ever been run on
+# Windows; the Linux jobs below are the first time it will run anywhere else.
+# docs/internal/CODEPULSE_FUTURE_CHANGES.md item 25 tracks this until a green
+# run has been seen.
+
 name: CI
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  # Cache location for the sentence-transformers model (all-MiniLM-L6-v2,
+  # about 90 MB). Without this every job downloads it again.
+  HF_HOME: ${{ github.workspace }}/.hf-cache
+
 jobs:
   test:
-    name: Test suite
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python-version: "3.11" }
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: windows-latest, python-version: "3.11" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install CPU-only torch (Linux)
+        # The default Linux torch wheel bundles CUDA (gigabytes). The pin must
+        # match pyproject.toml; the Windows wheel on PyPI is already CPU-only.
+        if: runner.os == 'Linux'
+        run: pip install "torch==2.3.1" --index-url https://download.pytorch.org/whl/cpu
       - name: Install CodePulse (editable, with dev extras)
         run: pip install -e ".[dev]"
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.HF_HOME }}
+          key: hf-all-MiniLM-L6-v2-${{ runner.os }}
       - name: Run the full test suite
         run: pytest tests/ -q
 
-  incremental-index-self:
-    # Commit-triggered incremental indexing, per §37 item 7.5's own
-    # literal wording -- dogfoods CodePulse against its own repository
-    # on every push, exercising the real git-diff-based incremental
-    # path (Phase 3.1) rather than a synthetic example.
-    name: Commit-triggered incremental indexing (self-index)
-    needs: test
+  package:
+    name: Build the wheel and check its contents
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # full history required for git-diff-based incremental detection
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Build sdist and wheel
+        run: |
+          pip install build twine
+          python -m build
+      - name: Check the package metadata
+        run: twine check dist/*
+      - name: The wheel must ship the schema migrations
+        # `codepulse migrate` and fresh installs rely on these living inside the
+        # package; an editable install would hide their absence.
+        run: |
+          python - <<'EOF'
+          import glob, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          needed = ["codepulse/storage/schema_migrations/env.py"]
+          missing = [n for n in needed if n not in names]
+          versions = [n for n in names if "schema_migrations/versions/" in n and n.endswith(".py")]
+          assert not missing, f"missing from wheel: {missing}"
+          assert versions, "no migration versions in the wheel"
+          print(wheel, "ships", len(versions), "migration scripts")
+          EOF
+
+  incremental-index-self:
+    # Commit-triggered incremental indexing (roadmap item 7.5): CodePulse
+    # indexes its own repository, exercising the real git-diff-based
+    # incremental path.
+    name: Commit-triggered incremental indexing (self-index)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history is required for git-diff-based incremental detection
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install CPU-only torch
+        run: pip install "torch==2.3.1" --index-url https://download.pytorch.org/whl/cpu
       - name: Install CodePulse
         run: pip install -e .
+      - name: Cache the embedding model
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.HF_HOME }}
+          key: hf-all-MiniLM-L6-v2-${{ runner.os }}
       - name: Incrementally index this repository's own commit
         run: |
           python -m codepulse.cli --db-url "sqlite:///${{ runner.temp }}/ci_index.db" update . --json

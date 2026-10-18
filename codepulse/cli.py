@@ -301,7 +301,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     defaults = CodePulseConfig()
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(
-            "# CodePulse local configuration -- see CodePulse_Strategy_and_Roadmap.md §25.\n"
+            "# CodePulse local configuration -- see docs/CodePulse_Strategy_and_Roadmap.md §25.\n"
             "# Precedence: CLI flags > CODEPULSE_* env vars > this file > built-in defaults.\n\n"
             f'db_url = "{defaults.db_url}"\n'
             f'embedding_model = "{defaults.embedding_model}"\n'

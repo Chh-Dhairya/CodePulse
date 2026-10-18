@@ -1,9 +1,27 @@
 [project]
-name = "codepulse"
+# The distribution name differs from the import package and the console script (both `codepulse`):
+# `codepulse`, `codepulse-cli` and `codepulse-ai` are already taken on PyPI by unrelated projects.
+name = "codepulse-engine"
 version = "0.1.0"
-description = "Semantic Codebase Intelligence Engine"
+description = "Local-first code intelligence engine: hybrid keyword, semantic and call-graph search and impact analysis for developers and AI agents, over a CLI, a REST API and an MCP server."
 readme = "README.md"
 license = { text = "MIT" }
+authors = [{ name = "Dhairya Chhabra" }]
+keywords = [
+    "code search", "code intelligence", "semantic search", "call graph", "impact analysis",
+    "mcp", "model context protocol", "tree-sitter", "local-first", "developer tools",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Indexing",
+]
 requires-python = ">=3.11,<3.13"
 dependencies = [
     # API & Web Framework

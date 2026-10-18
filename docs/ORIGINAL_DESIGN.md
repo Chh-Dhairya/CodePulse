@@ -1,3 +1,5 @@
+> **Status: the ORIGINAL design, not the current architecture.** This document was written before implementation and describes PostgreSQL with `pgvector`, Redis Streams, HNSW indexes, Docker Compose and a hosted multi-tenant deployment. **None of those were built.** CodePulse as shipped is local-first: SQLite, `sqlite-vec` (exact vector search), Tantivy BM25 and an in-process job runner, with a CLI, a REST API and an MCP server over one shared core. For what exists, read the [README](../README.md) and [CODEPULSE_PRODUCT_AND_ARCHITECTURE.md](CODEPULSE_PRODUCT_AND_ARCHITECTURE.md); for what was decided and why, read [CodePulse_Strategy_and_Roadmap.md](CodePulse_Strategy_and_Roadmap.md), which wins on any conflict. Kept for history and for the ideas that remain on the roadmap (a Postgres backend, Docker packaging).
+
 # Project Title
 
 CodePulse: Semantic Codebase Intelligence Engine

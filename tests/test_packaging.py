@@ -39,3 +39,34 @@ def test_project_declares_a_license_and_ships_the_license_file():
 def test_gitattributes_normalizes_line_endings():
     attrs = (ROOT / ".gitattributes").read_text(encoding="utf-8")
     assert "text=auto" in attrs
+
+
+# --- publishable metadata (2026-10-15 publication audit, FUTURE_CHANGES item 23) ------------
+
+def test_the_distribution_name_is_not_the_taken_pypi_name():
+    """`codepulse` (and codepulse-cli / codepulse-ai) are taken on PyPI by unrelated projects; the import package
+    and the console script stay `codepulse`, only the distribution name differs."""
+    project = _pyproject()["project"]
+    assert project["name"] == "codepulse-engine"
+    assert "codepulse" in project.get("scripts", {})
+
+
+def test_pyproject_carries_the_metadata_pypi_shows():
+    project = _pyproject()["project"]
+    assert len(project["description"]) >= 60, "a real one-sentence description"
+    assert project.get("authors") and project["authors"][0].get("name")
+    assert len(project.get("keywords", [])) >= 5
+    classifiers = project.get("classifiers", [])
+    assert "License :: OSI Approved :: MIT License" in classifiers
+    assert "Programming Language :: Python :: 3.11" in classifiers
+    assert "Programming Language :: Python :: 3.12" in classifiers
+    assert any(c.startswith("Development Status ::") for c in classifiers)
+    assert any(c.startswith("Intended Audience ::") for c in classifiers)
+    assert project.get("readme") == "README.md"
+
+
+def test_no_placeholder_text_in_the_published_metadata():
+    project = _pyproject()["project"]
+    text = repr(project)
+    for placeholder in ("YOUR-GITHUB", "TODO", "FIXME", "example.com", "<user>"):
+        assert placeholder not in text, f"placeholder {placeholder!r} would be published to PyPI"

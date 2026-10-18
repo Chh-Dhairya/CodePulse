@@ -2,11 +2,11 @@
 
 ## 1. Project Authority
 
-`CodePulse_Strategy_and_Roadmap.md` is the authoritative source of truth for product strategy, architecture, roadmap, milestone ordering, scope, and permanent invariants.
+`docs/CodePulse_Strategy_and_Roadmap.md` is the authoritative source of truth for product strategy, architecture, roadmap, milestone ordering, scope, and permanent invariants.
 
-`Implementation.md` and `README.md` are secondary documentation only.
+`docs/ORIGINAL_DESIGN.md` (the original, partly never-built design) and `README.md` are secondary documentation only.
 
-If any conflict exists between the roadmap and anything else — including this file, `CODEPULSE_PROGRESS.md`, prior agent claims, or prior conversation context — **the roadmap wins.**
+If any conflict exists between the roadmap and anything else — including this file, `docs/internal/CODEPULSE_PROGRESS.md`, prior agent claims, or prior conversation context — **the roadmap wins.**
 
 ## 2. Product Direction
 
@@ -81,7 +81,7 @@ Before implementation:
 8. Run tests.
 9. Inspect the Git diff.
 10. Verify against the roadmap.
-11. Update `CODEPULSE_PROGRESS.md`.
+11. Update `docs/internal/CODEPULSE_PROGRESS.md`.
 12. Create a Git checkpoint when the milestone is complete.
 
 ## 6. Deferred Scope
@@ -142,7 +142,7 @@ Before context exhaustion or ending a long implementation task:
 2. Run relevant tests.
 3. Inspect git status.
 4. Inspect git diff.
-5. Update `CODEPULSE_PROGRESS.md` with: current milestone, completed work, incomplete work, files changed, tests run, test results, database state if relevant, known problems, exact next action.
+5. Update `docs/internal/CODEPULSE_PROGRESS.md` with: current milestone, completed work, incomplete work, files changed, tests run, test results, database state if relevant, known problems, exact next action.
 6. If the milestone is complete, create the Git checkpoint.
 7. If the milestone is incomplete, clearly mark it PARTIAL.
 8. Never claim COMPLETE when work remains.
@@ -152,8 +152,8 @@ Before context exhaustion or ending a long implementation task:
 When starting a fresh context:
 
 1. Read `CLAUDE.md`.
-2. Read `CODEPULSE_PROGRESS.md`.
-3. Read `CodePulse_Strategy_and_Roadmap.md`.
+2. Read `docs/internal/CODEPULSE_PROGRESS.md`.
+3. Read `docs/CodePulse_Strategy_and_Roadmap.md`.
 4. Run `git status`.
 5. Run `git log`.
 6. Inspect the current working tree.
@@ -161,13 +161,13 @@ When starting a fresh context:
 8. Verify the progress document against the actual repository.
 9. Only then continue implementation.
 
-The filesystem, Git history, tests, database state, roadmap, `CLAUDE.md`, and `CODEPULSE_PROGRESS.md` are the durable project state.
+The filesystem, Git history, tests, database state, roadmap, `CLAUDE.md`, and `docs/internal/CODEPULSE_PROGRESS.md` are the durable project state.
 
 **The conversation is NOT the durable project state.**
 
 ## 11. Progress File Rules
 
-`CODEPULSE_PROGRESS.md` must be updated after every meaningful milestone or interrupted implementation.
+`docs/internal/CODEPULSE_PROGRESS.md` must be updated after every meaningful milestone or interrupted implementation.
 
 - Never fabricate progress.
 - Never mark work complete merely because code exists.
@@ -182,7 +182,7 @@ Do not fix unrelated technical debt unless:
 - it is required by the current milestone, or
 - the roadmap explicitly requires it.
 
-If an unrelated problem is discovered, record it in `CODEPULSE_PROGRESS.md` rather than silently expanding scope.
+If an unrelated problem is discovered, record it in `docs/internal/CODEPULSE_PROGRESS.md` rather than silently expanding scope.
 
 ## 13. Agent Handoff Rule
 
