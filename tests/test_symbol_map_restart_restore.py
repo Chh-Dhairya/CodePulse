@@ -36,6 +36,7 @@ from codepulse.config import reset_settings
 from codepulse.embeddings.embedder import CodeEmbedder
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.storage.db import StorageManager
+from codepulse.symbol_identity import symbol_doc_id
 from tests.conftest import make_api_key_headers
 
 
@@ -153,10 +154,10 @@ def test_symbol_map_is_restored_per_repository_with_the_right_repo_id(tmp_path, 
 
     engine2 = _restart(engine1, db_url, shared_embedder)
 
-    assert engine2.symbol_repo_map[f"{id_a}::m.py::helper"] == id_a
-    assert engine2.symbol_repo_map[f"{id_b}::m.py::helper"] == id_b
-    assert f"{id_a}::m.py::only_b" not in engine2.symbols_by_id
-    assert engine2.symbol_repo_map[f"{id_b}::m.py::only_b"] == id_b
+    assert engine2.symbol_repo_map[symbol_doc_id(id_a, "m.py", "helper", 1)] == id_a
+    assert engine2.symbol_repo_map[symbol_doc_id(id_b, "m.py", "helper", 1)] == id_b
+    assert symbol_doc_id(id_a, "m.py", "only_b", 5) not in engine2.symbols_by_id
+    assert engine2.symbol_repo_map[symbol_doc_id(id_b, "m.py", "only_b", 5)] == id_b
 
 
 def test_autocomplete_works_immediately_after_a_restart(tmp_path, shared_embedder, monkeypatch):
@@ -185,14 +186,14 @@ def test_a_full_reindex_drops_symbols_of_files_deleted_since_the_last_index(tmp_
     repo = _make_repo(tmp_path, "r5", {"core.py": CORE, "gone.py": GONE})
     engine = _new_engine(_db_url(tmp_path, "stale_same_process.db"), shared_embedder)
     repo_id = engine.index_directory(str(repo), repo_name="r5", repo_url=str(repo))["repository_id"]
-    assert f"{repo_id}::gone.py::doomed" in engine.symbols_by_id
+    assert symbol_doc_id(repo_id, "gone.py", "doomed", 1) in engine.symbols_by_id
 
     (repo / "gone.py").unlink()
     engine.index_directory(str(repo), repo_name="r5", repo_url=str(repo))  # not a git repo -> full run
 
-    assert f"{repo_id}::gone.py::doomed" not in engine.symbols_by_id
-    assert f"{repo_id}::gone.py::doomed" not in engine.symbol_repo_map
-    assert f"{repo_id}::core.py::add" in engine.symbols_by_id
+    assert symbol_doc_id(repo_id, "gone.py", "doomed", 1) not in engine.symbols_by_id
+    assert symbol_doc_id(repo_id, "gone.py", "doomed", 1) not in engine.symbol_repo_map
+    assert symbol_doc_id(repo_id, "core.py", "add", 1) in engine.symbols_by_id
 
 
 def test_a_full_reindex_after_a_restart_does_not_resurrect_deleted_symbols(tmp_path, shared_embedder):
@@ -201,13 +202,13 @@ def test_a_full_reindex_after_a_restart_does_not_resurrect_deleted_symbols(tmp_p
     engine1 = _new_engine(db_url, shared_embedder)
     repo_id = engine1.index_directory(str(repo), repo_name="r6", repo_url=str(repo))["repository_id"]
     engine2 = _restart(engine1, db_url, shared_embedder)
-    assert f"{repo_id}::gone.py::doomed" in engine2.symbols_by_id  # restored from the durable rows
+    assert symbol_doc_id(repo_id, "gone.py", "doomed", 1) in engine2.symbols_by_id  # restored from the durable rows
 
     (repo / "gone.py").unlink()
     engine2.index_directory(str(repo), repo_name="r6", repo_url=str(repo))
 
-    assert f"{repo_id}::gone.py::doomed" not in engine2.symbols_by_id
-    assert engine2.symbol_repo_map.get(f"{repo_id}::gone.py::doomed") is None
+    assert symbol_doc_id(repo_id, "gone.py", "doomed", 1) not in engine2.symbols_by_id
+    assert engine2.symbol_repo_map.get(symbol_doc_id(repo_id, "gone.py", "doomed", 1)) is None
 
 
 def test_a_full_reindex_only_clears_its_own_repositorys_entries(tmp_path, shared_embedder):
@@ -219,5 +220,5 @@ def test_a_full_reindex_only_clears_its_own_repositorys_entries(tmp_path, shared
 
     engine.index_directory(str(repo_a), repo_name="rx", repo_url=str(repo_a))
 
-    assert f"{id_b}::m.py::b_fn" in engine.symbols_by_id
-    assert f"{id_a}::m.py::a_fn" in engine.symbols_by_id
+    assert symbol_doc_id(id_b, "m.py", "b_fn", 1) in engine.symbols_by_id
+    assert symbol_doc_id(id_a, "m.py", "a_fn", 1) in engine.symbols_by_id

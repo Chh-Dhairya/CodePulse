@@ -48,6 +48,7 @@ from codepulse.storage.db import (
     StorageManager,
     SymbolModel,
 )
+from codepulse.symbol_identity import symbol_doc_id
 from tests.conftest import make_creator_headers
 
 
@@ -191,7 +192,7 @@ def test_after_a_failed_save_the_memory_matches_the_database_not_the_failed_run(
 
     assert "lost_function" not in [r.symbol_name for r in engine.search("lost_function", limit=5, search_type="keyword", repository_id=repo_id)]
     assert [r.symbol_name for r in engine.search("saved_function", limit=5, search_type="keyword", repository_id=repo_id)] == ["saved_function"]
-    assert f"{repo_id}::b.py::lost_function" not in engine.symbols_by_id
+    assert symbol_doc_id(repo_id, "b.py", "lost_function", 1) not in engine.symbols_by_id
     assert _counts(engine, repo_id)["files"] == 1
 
 

@@ -41,6 +41,7 @@ from codepulse.storage.db import (
     StorageManager,
     SymbolModel,
 )
+from codepulse.symbol_identity import symbol_doc_id
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +58,7 @@ def shared_embedder():
 
 KEEP = "from other import helper\n\n\ndef keep():\n    \"\"\"Stays.\"\"\"\n    return helper()\n"
 OTHER = "def helper():\n    return 1\n"
+DOOMED_LINE = 4  # `def doomed` is on line 4 of DOOMED
 DOOMED = "from other import helper\n\n\ndef doomed():\n    \"\"\"Goes away.\"\"\"\n    return helper()\n"
 
 
@@ -147,7 +149,7 @@ def test_a_deleted_file_is_removed_from_every_index_on_the_next_full_run(tmp_pat
     assert state["embeddings"] < embeddings_before, "the deleted file's embeddings must go too"
     assert (state["file_count"], state["symbol_count"]) == (2, len(state["symbols"])), "counts must reflect the real rows"
     assert _hits(engine, repo_id, "doomed") == []
-    assert f"{repo_id}::gone.py::doomed" not in engine.symbols_by_id
+    assert symbol_doc_id(repo_id, "gone.py", "doomed", DOOMED_LINE) not in engine.symbols_by_id
     assert f"{repo_id}::gone.py" not in engine.parse_results
 
 
@@ -269,7 +271,7 @@ def test_purging_one_repository_never_touches_another(tmp_path, shared_embedder)
     assert _db_state(engine, id_a)["files"] == ["keep.py", "other.py"]
     assert _db_state(engine, id_b) == b_before
     assert _hits(engine, id_b, "doomed") == ["doomed"]
-    assert f"{id_b}::gone.py::doomed" in engine.symbols_by_id
+    assert symbol_doc_id(id_b, "gone.py", "doomed", DOOMED_LINE) in engine.symbols_by_id
 
 
 def test_the_derived_graph_rows_of_a_deleted_file_are_gone_too(tmp_path, shared_embedder):

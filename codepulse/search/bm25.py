@@ -17,7 +17,8 @@ def _build_schema() -> "tantivy.Schema":
     CODEPULSE_PROGRESS.md's Phase 2.1 section for the exact APIs checked):
 
     - `doc_id`: the CodePulse-level identity string (e.g.
-      "{repo_id}::{file_path}::{name}"), stored so it can be read back on
+      "{repo_id}::{file_path}::{name}@{start_line}", see
+      `codepulse.symbol_identity`), stored so it can be read back on
       every hit. `tokenizer_name="raw"` means the whole string is one exact
       token -- this field is never searched against, only ever stored/
       retrieved and, for `add_document`'s direct callers, exact-matched.

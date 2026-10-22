@@ -32,6 +32,7 @@ import pytest
 from codepulse.embeddings.embedder import CodeEmbedder
 from codepulse.indexer.engine import IndexingEngine
 from codepulse.storage.db import StorageManager
+from codepulse.symbol_identity import symbol_doc_id
 
 _DIM = 384
 
@@ -98,7 +99,7 @@ def _symbols(results):
 def test_the_long_function_really_has_several_chunks(engine_and_repo):
     """Guard for the tests below: without several chunks per symbol they prove nothing."""
     engine, repo_id = engine_and_repo
-    chunk_ids = [d for d in engine.vector_index.doc_ids if "::verify_archive::" in d]
+    chunk_ids = [d for d in engine.vector_index.doc_ids if "::verify_archive@" in d]
     assert len(chunk_ids) >= 3, chunk_ids
 
 
@@ -115,7 +116,7 @@ def test_each_symbol_appears_at_most_once(engine_and_repo, mode):
 def test_result_ids_are_symbol_ids_not_chunk_ids(engine_and_repo, mode):
     engine, repo_id = engine_and_repo
     for r in engine.search(QUERY, limit=10, search_type=mode, repository_id=repo_id):
-        assert r.doc_id == f"{repo_id}::{r.file_path}::{r.symbol_name}", r.doc_id
+        assert r.doc_id == symbol_doc_id(repo_id, r.file_path, r.symbol_name, r.start_line), r.doc_id
         assert r.doc_id in engine.symbols_by_id
 
 
@@ -200,10 +201,9 @@ def test_similar_symbols_lists_each_symbol_once(engine_and_repo):
 
 # --- same-named symbols in one file ---------------------------------------------------
 #
-# Symbol ids are `repo::file::name`, so three classes' `__init__` in one file share an id
-# (FUTURE_CHANGES item 31, a separate pre-existing defect: the database keeps all three rows,
-# memory keeps one). Folding chunks per symbol must not make that worse: a result must never be
-# described with another symbol's line range.
+# Same-named symbols in one file (three classes' `__init__`) used to share one id (FUTURE_CHANGES
+# item 31, fixed: ids now carry the start line, see tests/test_symbol_identity.py). Folding chunks per
+# symbol must keep them apart: a result must never be described with another symbol's line range.
 
 _COLLIDING = '''class Alpha:
     def __init__(self, a):
@@ -246,39 +246,3 @@ def test_a_result_is_never_described_with_another_symbols_line_range(colliding_e
         f"{mode}/{who}: the best __init__ result spans {first_init.start_line}-{first_init.end_line}, "
         f"not the line {_INIT_LINES[who]} of {who}'s own __init__"
     )
-
-
-def test_shared_ids_are_recorded_and_unshared_symbols_are_still_folded(colliding_engine):
-    engine, repo_id = colliding_engine
-    assert engine.ambiguous_symbol_ids == {f"{repo_id}::m.py::__init__"}
-    # the classes themselves have unique ids and fold normally: one row each
-    rows = engine.search("Alpha constructor stores the alpha value", limit=20, search_type="semantic", repository_id=repo_id)
-    assert [r.symbol_name for r in rows].count("Alpha") == 1
-
-
-def test_the_shared_ids_are_restored_after_a_restart_and_collisions_stay_correct(tmp_path):
-    repo = tmp_path / "colliding"
-    repo.mkdir()
-    (repo / "m.py").write_text(_COLLIDING, encoding="utf-8")
-    url = f"sqlite:///{(tmp_path / 'restart.db').as_posix()}"
-    first = IndexingEngine(storage=StorageManager(db_url=url), embedder=_embedder())
-    repo_id = first.index_directory(str(repo), repo_name="col", repo_url=str(repo))["repository_id"]
-    first.storage.engine.dispose()
-
-    restarted = IndexingEngine(storage=StorageManager(db_url=url), embedder=_embedder())
-
-    assert restarted.ambiguous_symbol_ids == {f"{repo_id}::m.py::__init__"}
-    rows = restarted.search("beta constructor stores the beta value", limit=10, search_type="hybrid", repository_id=repo_id)
-    first_init = next(r for r in rows if r.symbol_name == "__init__")
-    assert first_init.start_line <= _INIT_LINES["beta"] <= first_init.end_line
-
-
-def test_removing_the_file_forgets_its_shared_ids(colliding_engine, tmp_path):
-    engine, repo_id = colliding_engine
-    repo_path = next(p for p in tmp_path.iterdir() if p.name == "colliding")
-    (repo_path / "m.py").unlink()
-    (repo_path / "other.py").write_text("def only_one():\n    return 1\n", encoding="utf-8")
-
-    engine.index_directory(str(repo_path), repo_name="col", repo_url=str(repo_path))
-
-    assert engine.ambiguous_symbol_ids == set()

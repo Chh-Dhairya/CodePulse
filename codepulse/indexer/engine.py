@@ -35,6 +35,7 @@ from codepulse.storage.db import (
     StorageManager,
     SymbolModel,
 )
+from codepulse.symbol_identity import chunk_doc_id, symbol_doc_id
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +161,6 @@ class IndexingEngine:
         self._restored_module_graphs: dict[int, ModuleGraphBuilder] = {}
         self._warned_module_edges_missing = False
         self.symbols_by_id: dict[str, Symbol] = {}
-        # Symbol ids are `repo::file::name`, so same-named symbols in one file (several classes'
-        # `__init__`, say) share an id: the database keeps every row but this map keeps one.
-        # The ids shared that way are recorded here so result folding leaves them alone
-        # (FUTURE_CHANGES item 31 is the real fix: unique ids).
-        self.ambiguous_symbol_ids: set[str] = set()
         # Phase 0.6: doc_id -> owning RepositoryModel.id, built alongside
         # symbols_by_id, so hybrid search's graph-score step can skip
         # symbols belonging to a different repository than the one a scoped
@@ -394,11 +390,11 @@ class IndexingEngine:
         symbol_keys: list[tuple[str, str]] = []
         symbol_rows = session.query(SymbolModel).filter(SymbolModel.file_id == fm.id).all()
         for sm in symbol_rows:
-            bm25_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}")
+            bm25_doc_ids.append(symbol_doc_id(repo_id, fm.path, sm.name, sm.start_line))
             symbol_keys.append((fm.path, sm.name))
             embedding_rows = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
             for em in embedding_rows:
-                vector_doc_ids.append(f"{repo_id}::{fm.path}::{sm.name}::{em.chunk_index}")
+                vector_doc_ids.append(chunk_doc_id(repo_id, fm.path, sm.name, sm.start_line, em.chunk_index))
         return bm25_doc_ids, vector_doc_ids, symbol_keys
 
     def _purge_stale_entries(self, repo_id: int, relpaths: list[str]) -> set[tuple[str, str]]:
@@ -421,10 +417,12 @@ class IndexingEngine:
 
           2. Modified files (`IncrementalPlan.changed_relpaths`), called
              BEFORE they are re-parsed -- a modified symbol's `doc_id` is
-             derived from `repo_id::file_path::symbol_name`, which is
-             stable across a content-only change, so without removing the
-             OLD entries first, re-adding the freshly re-parsed symbols
-             under the same doc_id strings would silently accumulate
+             `symbol_doc_id(repo, file, name, start_line)`, which is
+             stable across a content-only change that leaves the symbol's
+             lines alone (a change that shifts them yields a new id, and
+             the old one is purged here from the durable row), so without
+             removing the OLD entries first, re-adding the freshly
+             re-parsed symbols under the same doc_id strings would silently accumulate
              duplicate lexical/vector entries. This is the same class of
              problem Phase 2.1's `remove_repo` (whole-repo granularity)
              and this milestone's own `remove_docs` (fine-grained) exist
@@ -740,7 +738,7 @@ class IndexingEngine:
                 if existing_sm.body_hash == sym.body_hash:
                     unchanged_ids.add(id(sym))
                 else:
-                    bm25_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sym.name}")
+                    bm25_doc_ids_to_purge.append(symbol_doc_id(repo_id, rel_path, sym.name, sym.start_line))
                     embedding_rows = (
                         session.query(EmbeddingModel)
                         .filter(EmbeddingModel.symbol_id == existing_sm.id)
@@ -748,16 +746,16 @@ class IndexingEngine:
                     )
                     for em in embedding_rows:
                         vector_doc_ids_to_purge.append(
-                            f"{repo_id}::{rel_path}::{sym.name}::{em.chunk_index}"
+                            chunk_doc_id(repo_id, rel_path, sym.name, sym.start_line, em.chunk_index)
                         )
 
             disappeared = [sm for sm in existing_by_key.values() if sm.id not in matched_existing_ids]
             for sm in disappeared:
-                bm25_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sm.name}")
+                bm25_doc_ids_to_purge.append(symbol_doc_id(repo_id, rel_path, sm.name, sm.start_line))
                 disappeared_keys.add((rel_path, sm.name))
                 embedding_rows = session.query(EmbeddingModel).filter(EmbeddingModel.symbol_id == sm.id).all()
                 for em in embedding_rows:
-                    vector_doc_ids_to_purge.append(f"{repo_id}::{rel_path}::{sm.name}::{em.chunk_index}")
+                    vector_doc_ids_to_purge.append(chunk_doc_id(repo_id, rel_path, sm.name, sm.start_line, em.chunk_index))
                 session.delete(sm)
 
             if disappeared:
@@ -1161,18 +1159,20 @@ class IndexingEngine:
                     # explicitly-tested scenario) would collide in this
                     # shared in-memory vector index instead of staying
                     # isolated.
-                    doc_id = f"{repo_id}::{c.file_path}::{c.symbol_name}::{c.chunk_index}"
+                    chunk_symbol = chunk_symbol_map[id(c)]
+                    doc_id = chunk_doc_id(repo_id, c.file_path, chunk_symbol.name, chunk_symbol.start_line, c.chunk_index)
                     doc_ids.append(doc_id)
                     metadatas.append({
                         "repo_id": repo_id,
                         "symbol_name": c.symbol_name,
+                        "symbol_start_line": chunk_symbol.start_line,
                         "file_path": c.file_path,
                         "chunk_type": c.chunk_type,
                         "start_line": c.start_line,
                         "end_line": c.end_line,
                         "snippet": c.content[:200],
                     })
-                    chunk_embeddings.append((chunk_symbol_map[id(c)], c, embeddings[idx]))
+                    chunk_embeddings.append((chunk_symbol, c, embeddings[idx]))
 
                 self.vector_index.add_batch(doc_ids, embeddings, metadatas)
 
@@ -1215,10 +1215,10 @@ class IndexingEngine:
             # behind in autocomplete and the graph-score walk.
             for stale_doc_id in [d for d, r in self.symbol_repo_map.items() if r == repo_id]:
                 self._forget_symbol(stale_doc_id)
-        registered_this_run: set[str] = set()
         for sym in all_symbols:
-            doc_id = f"{repo_id}::{sym.file_path}::{sym.name}"
-            self._remember_symbol(doc_id, sym, repo_id, registered_this_run)
+            doc_id = symbol_doc_id(repo_id, sym.file_path, sym.name, sym.start_line)
+            self.symbols_by_id[doc_id] = sym
+            self.symbol_repo_map[doc_id] = repo_id
             if id(sym) in unchanged_symbol_ids:
                 # Phase 3.3: this symbol's existing lexical document is
                 # already correct and was deliberately left untouched by
@@ -1960,12 +1960,13 @@ class IndexingEngine:
                 # metadata, matching the scheme used at index time -- see
                 # index_directory's comment on why this prefix is needed to
                 # avoid collisions between repositories sharing a path.
-                doc_id = f"{repo_record.id}::{fm.path}::{sm.name}::{em.chunk_index}"
+                doc_id = chunk_doc_id(repo_record.id, fm.path, sm.name, sm.start_line, em.chunk_index)
                 doc_ids.append(doc_id)
                 vectors.append(vec)
                 metadatas.append({
                     "repo_id": repo_record.id,
                     "symbol_name": sm.name,
+                    "symbol_start_line": sm.start_line,
                     "file_path": fm.path,
                     "chunk_type": em.chunk_type,
                     "start_line": sm.start_line,
@@ -1988,7 +1989,6 @@ class IndexingEngine:
                 .all()
             )
             hydrated_symbols = 0
-            registered_this_pass: set[str] = set()
             for sm, fm in symbol_rows:
                 try:
                     symbol_obj = Symbol(
@@ -2008,15 +2008,16 @@ class IndexingEngine:
                     )
                     continue
                 # Matches index_directory's own doc_id format exactly
-                # (repo_id::file_path::name) -- required so a subsequent
+                # (`symbol_doc_id`) -- required so a subsequent
                 # index_directory() call's remove_repo/add_symbol pair
                 # replaces this hydrated entry rather than duplicating it.
-                doc_id = f"{repo_record.id}::{fm.path}::{sm.name}"
+                doc_id = symbol_doc_id(repo_record.id, fm.path, sm.name, sm.start_line)
                 self.bm25_index.add_symbol(doc_id, symbol_obj, repo_id=repo_record.id)
                 # The in-memory symbol map (hybrid ranking's graph score,
                 # autocomplete, stats) is a derived cache of these same
                 # rows; restoring it keeps those correct after a restart.
-                self._remember_symbol(doc_id, symbol_obj, repo_record.id, registered_this_pass)
+                self.symbols_by_id[doc_id] = symbol_obj
+                self.symbol_repo_map[doc_id] = repo_record.id
                 hydrated_symbols += 1
             if hydrated_symbols:
                 self.bm25_index.build()
@@ -2145,80 +2146,40 @@ class IndexingEngine:
     def _forget_symbol(self, doc_id: str) -> None:
         self.symbols_by_id.pop(doc_id, None)
         self.symbol_repo_map.pop(doc_id, None)
-        self.ambiguous_symbol_ids.discard(doc_id)
-
-    def _remember_symbol(self, doc_id: str, symbol: Symbol, repo_id: int, already_registered_here: set[str]) -> None:
-        """Registers a symbol in the in-memory maps; an id registered twice in one pass is ambiguous."""
-        if doc_id in already_registered_here:
-            self.ambiguous_symbol_ids.add(doc_id)
-        already_registered_here.add(doc_id)
-        self.symbols_by_id[doc_id] = symbol
-        self.symbol_repo_map[doc_id] = repo_id
 
     # An unscoped search asks the vector index for this many chunks per requested
     # result: a symbol has about 2.5 chunks, and several of a symbol's chunks can
     # rank together, so `limit` results need well over `limit` chunk hits.
     _CHUNK_HITS_PER_RESULT = 6
 
-    def _disambiguate_lexical_hits(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """
-        Lexical documents of a shared symbol id (see `ambiguous_symbol_ids`) each carry their own
-        metadata, but fusion merges rows by `doc_id`, so the later one overwrote the earlier. Give
-        each such document an id unique to its own line, matching how unfolded chunk rows are keyed.
-        """
-        if not self.ambiguous_symbol_ids:
-            return hits
-        return [
-            {**h, "doc_id": f"{h['doc_id']}@{h.get('metadata', {}).get('start_line')}"} if h["doc_id"] in self.ambiguous_symbol_ids else h
-            for h in hits
-        ]
-
     def _fold_vector_hits_by_symbol(self, hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """
         One vector hit per SYMBOL instead of per chunk (FUTURE_CHANGES item 20).
 
-        The vector index stores one document per chunk
-        (`repo::file::symbol::chunk_index`) while the lexical index stores one per
-        symbol (`repo::file::symbol`). Fusion merges candidates by `doc_id`, so
-        chunk-level vector ids never met a symbol's keyword score, and several
-        chunks of one function filled a result list. Here each chunk hit is
-        re-keyed to its symbol's id; a symbol takes its BEST chunk's score (ties
-        go to the lower chunk id, so the choice never depends on index order).
-        The row's metadata describes the symbol (type, signature, docstring,
-        language, its own line range) the way the lexical index's does, which a
-        chunk's metadata could not; the best chunk's snippet is kept. Output is
-        ordered best score first, then by id, so the same query over the same
+        The vector index stores one document per chunk while the lexical index
+        stores one per symbol, and fusion merges candidates by `doc_id`. Here each
+        chunk hit is re-keyed to its symbol's id (`symbol_doc_id`, built from the
+        chunk's metadata: repository, file, name and the symbol's start line, so
+        same-named symbols in a file stay apart: item 31); a symbol takes its BEST
+        chunk's score (ties go to the lower chunk id, so the choice never depends on
+        index order). The row's metadata describes the symbol (type, signature,
+        docstring, language, its own line range) the way the lexical index's does,
+        which a chunk's metadata could not; the best chunk's snippet is kept. Output
+        is ordered best score first, then by id, so the same query over the same
         snapshot always returns the same list.
         """
         best: dict[str, dict[str, Any]] = {}
-        owner: dict[str, Any] = {}
         for hit in hits:
             meta = hit.get("metadata", {})
-            symbol_doc_id = f"{meta.get('repo_id')}::{meta.get('file_path')}::{meta.get('symbol_name')}"
-            symbol = self.symbols_by_id.get(symbol_doc_id)
-            chunk_start = meta.get("start_line")
-            if (
-                symbol is not None
-                and symbol_doc_id not in self.ambiguous_symbol_ids
-                and chunk_start is not None
-                and symbol.start_line <= chunk_start <= symbol.end_line
-            ):
-                key = symbol_doc_id
-                owner[key] = symbol
-            else:
-                # An id shared by several same-named symbols in one file (FUTURE_CHANGES item 31) cannot
-                # say which of them a chunk belongs to, and memory holds only one of them: describing the
-                # chunk with it would show another symbol's lines. Such chunks pass through unfolded, as
-                # the chunk-level rows they always were (the chunk's own, correct lines and id).
-                key = hit["doc_id"] + f"@{chunk_start}"
+            key = symbol_doc_id(meta.get("repo_id"), meta.get("file_path"), meta.get("symbol_name"), meta.get("symbol_start_line"))
             current = best.get(key)
             if current is None or (-hit["relevance_score"], hit["doc_id"]) < (-current["relevance_score"], current["doc_id"]):
                 best[key] = hit
 
         folded: list[dict[str, Any]] = []
-        for symbol_doc_id, hit in best.items():
+        for key, hit in best.items():
             chunk_meta = hit.get("metadata", {})
-            symbol = owner.get(symbol_doc_id)
+            symbol = self.symbols_by_id.get(key)
             if symbol is not None:
                 metadata = {
                     "symbol_name": symbol.name,
@@ -2234,7 +2195,7 @@ class IndexingEngine:
                 }
             else:
                 metadata = dict(chunk_meta)
-            folded.append({**hit, "doc_id": symbol_doc_id, "metadata": metadata})
+            folded.append({**hit, "doc_id": key, "metadata": metadata})
         folded.sort(key=lambda h: (-h["relevance_score"], h["doc_id"]))
         return folded
 
@@ -2315,7 +2276,7 @@ class IndexingEngine:
             # result set below `limit`; the ranker still truncates to
             # `limit` at the end. Unscoped: unchanged (`top_k=limit`).
             bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit
-            bm25_res = self._disambiguate_lexical_hits(_repo_filter(self.bm25_index.search(query, top_k=bm25_pool)))
+            bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
             return self.ranker.fuse(query, bm25_results=bm25_res, vector_results=[], top_k=limit)
 
         elif search_type == "semantic":
@@ -2341,7 +2302,7 @@ class IndexingEngine:
             bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit * 2
             vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit * self._CHUNK_HITS_PER_RESULT
 
-            bm25_res = self._disambiguate_lexical_hits(_repo_filter(self.bm25_index.search(query, top_k=bm25_pool)))
+            bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
             query_vec = _encode_query_or_degrade(query)
             vector_res = (
                 self._fold_vector_hits_by_symbol(_repo_filter(self.vector_index.search(query_vec, top_k=vector_pool)))
@@ -2355,7 +2316,7 @@ class IndexingEngine:
             bm25_pool = self.bm25_index.num_docs if repository_id is not None else limit * 2
             vector_pool = len(self.vector_index.doc_ids) if repository_id is not None else limit * self._CHUNK_HITS_PER_RESULT
 
-            bm25_res = self._disambiguate_lexical_hits(_repo_filter(self.bm25_index.search(query, top_k=bm25_pool)))
+            bm25_res = _repo_filter(self.bm25_index.search(query, top_k=bm25_pool))
             query_vec = _encode_query_or_degrade(query)
             vector_res = (
                 self._fold_vector_hits_by_symbol(_repo_filter(self.vector_index.search(query_vec, top_k=vector_pool)))
