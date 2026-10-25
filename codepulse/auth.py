@@ -275,6 +275,34 @@ def list_api_keys_for_repositories(storage: StorageManager, repository_ids: set[
         session.close()
 
 
+def register_repository(storage: StorageManager, repo_name: str, repo_url: str) -> tuple[int, bool]:
+    """
+    Makes sure a repository row exists for `repo_url` and returns `(repository_id, created)`, granting NOTHING to
+    anyone. It is the same empty row indexing would create (no files, no symbols), found under any spelling of the
+    same directory, so a later index run reuses it. Used by `codepulse key create` so a key can be scoped to a folder
+    that has not been indexed yet: the first-run flow is "make a key for this folder, then index it with that key".
+    Contrast `create_repository_owned_by`, which also writes the creating key's admin grant.
+    """
+    session = storage.get_session()
+    try:
+        existing = find_repository(session, repo_url)
+        if existing is not None:
+            return existing.id, False
+        repo = RepositoryModel(name=repo_name, url=canonical_repository_url(repo_url), file_count=0, symbol_count=0)
+        session.add(repo)
+        session.commit()
+        return repo.id, True
+    except IntegrityError:
+        # Lost a race to create the same url: use the row the other call made.
+        session.rollback()
+        existing = find_repository(session, repo_url)
+        if existing is None:
+            raise
+        return existing.id, False
+    finally:
+        session.close()
+
+
 def create_repository_owned_by(
     storage: StorageManager, repo_name: str, repo_url: str, api_key_id: int
 ) -> tuple[int, bool]:

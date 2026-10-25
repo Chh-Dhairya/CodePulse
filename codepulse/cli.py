@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from collections.abc import Mapping
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -303,7 +304,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         f.write(
             "# CodePulse local configuration -- see docs/CodePulse_Strategy_and_Roadmap.md §25.\n"
             "# Precedence: CLI flags > CODEPULSE_* env vars > this file > built-in defaults.\n\n"
-            f'db_url = "{defaults.db_url}"\n'
+            "# Keep the database in THIS directory (project-local). Remove the line to use the default: one database\n"
+            "# per user, in your operating system's per-user data directory.\n"
+            'db_url = "sqlite:///codepulse.db"\n'
             f'embedding_model = "{defaults.embedding_model}"\n'
         )
     console.print(f"[bold green]✓[/bold green] Created {config_path}")
@@ -617,6 +620,50 @@ def cmd_migrate(args: argparse.Namespace) -> None:
         sys.exit({"up-to-date": 0, "needs-upgrade": 1, "needs-stamp": 1, "blocked": 2}.get(result.action, 0))
 
 
+def cmd_key_create(args: argparse.Namespace) -> None:
+    """
+    Creates an API key scoped to the given folders: how a new user gets their first key (a fresh install has none, and
+    `POST /v1/admin/keys` needs an admin key to exist already). A folder not in the database yet is registered as an
+    empty repository, so the editor can then index it with this key. The raw key is printed once, on stdout, and only
+    its hash is stored. A key with no repository grant can do nothing, so at least one `--repo` is required.
+    """
+    from codepulse.auth import create_api_key, register_repository
+    from codepulse.config import get_settings
+    from codepulse.repository_identity import canonical_repository_url
+    from codepulse.storage.db import StorageManager
+
+    storage = StorageManager(db_url=get_settings().db_url)
+    repositories: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in args.repo:
+        canonical = canonical_repository_url(os.path.abspath(path))
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        name = os.path.basename(canonical.rstrip("/\\")) or canonical
+        repo_id, created = register_repository(storage, name, canonical)
+        repositories.append({"id": repo_id, "name": name, "path": canonical, "registered": created})
+
+    created_key = create_api_key(storage, args.name, [r["id"] for r in repositories], role=args.role)
+
+    if args.json:
+        _print_json({
+            "id": created_key.id, "name": created_key.name, "role": args.role, "key": created_key.raw_key,
+            "repositories": repositories,
+        })
+        return
+
+    console.print(f"[bold green]✓ Created API key[/bold green] '{created_key.name}' (id {created_key.id}, role {args.role}) for:")
+    for r in repositories:
+        note = "registered, not indexed yet" if r["registered"] else "already known"
+        console.print(f"  {r['id']}  {r['name']}  [dim]{r['path']}  ({note})[/dim]")
+    console.print("[bold]Your key (shown once and never stored, so copy it now):[/bold]")
+    print(created_key.raw_key)  # plain print: exactly the key, on a line of its own
+    console.print("Next, in VS Code (Command Palette):")
+    console.print("  1. [bold]CodePulse: Set API Key[/bold]  and paste the key")
+    console.print("  2. [bold]CodePulse: Index Workspace[/bold]")
+
+
 def cmd_doctor(args: argparse.Namespace) -> None:
     """Environment/config diagnostics -- embedding model loads? DB reachable? ignore rules active?"""
     from codepulse.config import get_settings
@@ -843,6 +890,25 @@ def main() -> None:
     migrate_p.add_argument("--no-backup", action="store_true", help="Do not copy a SQLite database before changing it")
     migrate_p.add_argument("--json", action="store_true")
 
+    from codepulse.auth import VALID_ROLES
+
+    key_p = subparsers.add_parser("key", help="Manage API keys (this is where you create your first one)")
+    key_sub = key_p.add_subparsers(dest="key_command", required=True)
+    key_create_p = key_sub.add_parser(
+        "create",
+        help="Create an API key scoped to one or more folders (registers a folder that is not known yet)",
+    )
+    key_create_p.add_argument(
+        "--repo", action="append", required=True, metavar="PATH",
+        help="A project folder the key may access (repeatable; at least one: a key with no folder can do nothing)",
+    )
+    key_create_p.add_argument("--name", default="codepulse", help="A label for the key (default: codepulse)")
+    key_create_p.add_argument(
+        "--role", choices=list(VALID_ROLES), default="indexer",
+        help="viewer = search and read; indexer = viewer + index; admin = everything incl. managing keys (default: indexer)",
+    )
+    key_create_p.add_argument("--json", action="store_true", help="Print the key and what it covers as JSON")
+
     serve_p = subparsers.add_parser("serve", help="Start the local API server (or the MCP server with --mcp)")
     serve_p.add_argument("--host", default="127.0.0.1")
     serve_p.add_argument("--port", type=int, default=8000)
@@ -877,8 +943,13 @@ def main() -> None:
     # behind. Validated here, BEFORE the database diagnostic and before
     # anything can create a database. `parse` (a file), `init` (creates its
     # directory), `doctor` (optional) and `serve` (no path) are exempt.
+    missing_path = None
     if args.command in _REPOSITORY_PATH_COMMANDS and not os.path.isdir(args.path):
-        message = f"Path '{args.path}' is not an existing directory"
+        missing_path = args.path
+    elif args.command == "key" and args.key_command == "create":
+        missing_path = next((p for p in args.repo if not os.path.isdir(p)), None)
+    if missing_path is not None:
+        message = f"Path '{missing_path}' is not an existing directory"
         if getattr(args, "json", False):
             _print_json({"error": "path_not_found", "message": message})
         else:
@@ -908,8 +979,9 @@ def main() -> None:
             _stderr_console.print(
                 f"[yellow]⚠ No existing database found -- creating a NEW, empty one at:[/yellow]\n"
                 f"[yellow]  {resolved_db}[/yellow]\n"
-                f"[dim]If you expected to reuse an existing database instead, check your current "
-                f"directory, or set --db-url / CODEPULSE_DB_URL explicitly.[/dim]"
+                f"[dim]CodePulse keeps one database per user by default. If you expected to reuse an existing "
+                f"one, set --db-url / CODEPULSE_DB_URL, or run this from the directory that holds your "
+                f"codepulse.db.[/dim]"
             )
         else:
             _stderr_console.print(f"[dim]Using database: {resolved_db}[/dim]")
@@ -969,6 +1041,9 @@ def _dispatch(args: argparse.Namespace) -> None:
         cmd_doctor(args)
     elif args.command == "migrate":
         cmd_migrate(args)
+    elif args.command == "key":
+        if args.key_command == "create":
+            cmd_key_create(args)
     elif args.command == "serve":
         cmd_serve(args)
 

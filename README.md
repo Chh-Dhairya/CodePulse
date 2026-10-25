@@ -39,11 +39,18 @@ codepulse status path/to/repo                    # index freshness
 codepulse doctor                                 # environment diagnostics
 ```
 
-Every query command accepts `--json`. Run `codepulse --help` for the full list: `parse`, `search`, `impact`, `init`, `index`, `update`, `symbol`, `refs`, `callers`, `callees`, `similar`, `status`, `modules`, `doctor`, `serve`.
+Every query command accepts `--json`. Run `codepulse --help` for the full list: `parse`, `search`, `impact`, `init`, `index`, `update`, `symbol`, `refs`, `callers`, `callees`, `similar`, `status`, `modules`, `doctor`, `migrate`, `key`, `serve`.
 
 ### Where the database lives
 
-The default database is `sqlite:///codepulse.db`, **relative to the directory you run the command from**. A `codepulse.toml` is picked up only from that same directory. Run commands from the same place each time, or pin the location with `--db-url`, `CODEPULSE_DB_URL`, or `db_url` in `codepulse.toml`. When a command is about to create a new database, it says so on stderr.
+By default there is **one database per user**, in your operating system's per-user data directory (`%LOCALAPPDATA%\CodePulse` on Windows, `~/Library/Application Support/CodePulse` on macOS, `$XDG_DATA_HOME/codepulse` or `~/.local/share/codepulse` on Linux), so it does not matter which directory you run a command from and nothing is written into your projects. Set `CODEPULSE_DATA_DIR` to move that directory.
+
+Two things override the default:
+
+- An explicit setting always wins: `--db-url`, `CODEPULSE_DB_URL`, or `db_url` in `codepulse.toml` (`codepulse init` writes a project-local one).
+- If the directory you run from already contains a `codepulse.db`, that file is used (it was the default before), so existing setups keep working unchanged.
+
+Every command prints which database it is using on stderr, and says so when it is about to create a new one. A `codepulse.toml` is picked up only from the directory you run from.
 
 ### Incremental indexing
 
@@ -57,17 +64,15 @@ codepulse serve                    # http://127.0.0.1:8000
 
 Interactive docs are at `/docs`. Health checks are `/health/live` and `/health/ready`; `/metrics` exposes Prometheus metrics. All other endpoints need an `X-API-Key` header.
 
-Keys are scoped to repositories and carry a role: `viewer` < `indexer` < `admin`. Creating a key needs an admin key, so mint the first one locally (run from the directory that holds your `codepulse.db`):
+Keys are scoped to repositories and carry a role: `viewer` (search and read) < `indexer` (plus indexing) < `admin` (plus managing keys). Creating a key over REST needs an admin key, so make your first one on the command line:
 
 ```bash
-python -c "
-from codepulse.storage.db import StorageManager
-from codepulse.auth import create_api_key
-key = create_api_key(StorageManager(db_url='sqlite:///codepulse.db'), 'first-admin', repository_ids=[1], role='admin')
-print(key.raw_key)"
+codepulse key create --repo path/to/project                  # role indexer (the default)
+codepulse key create --repo path/to/project --role admin --name ci
+codepulse key create --repo a --repo b --json                # several folders; machine-readable
 ```
 
-The raw key is shown once and only its hash is stored. `repository_ids` must reference an existing repository, so index something first. Further keys come from `POST /v1/admin/keys`. A key can index a new repository only if it already holds the `indexer` role (or higher) on some existing repository; the key that creates a repository becomes its `admin`, so it can follow the indexing job and see the result.
+It prints the key once (only its hash is stored) and registers the folder if it is not in the database yet, so you can index it with that key right away. At least one `--repo` is required, since a key with no repository can do nothing. Further keys can come from `POST /v1/admin/keys`. A key can index a new repository only if it already holds the `indexer` role (or higher) on some existing repository; the key that creates a repository becomes its `admin`, so it can follow the indexing job and see the result.
 
 Main endpoints: `POST /v1/search`, `POST /v1/repositories/index`, `GET /v1/repositories/{id}/index-status`, `GET /v1/symbols/{id}`, `POST /v1/symbols/{id}/impact-analysis`, `POST /v1/symbols/{id}/similar`, `GET /v1/symbols/{id}/references`, `POST /v1/agent/context`. Errors always use one shape: `{"error": {"code", "message", "details"}}`. Requests are rate-limited per key (5 req/s, burst 20, configurable).
 

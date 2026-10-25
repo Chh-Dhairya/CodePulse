@@ -10,6 +10,7 @@ from codepulse.config import (
     reset_settings,
     set_settings,
 )
+from codepulse.data_location import default_database_url
 from codepulse.embeddings.chunker import SemanticChunker
 from codepulse.embeddings.embedder import CodeEmbedder
 from codepulse.search.bm25 import BM25Index
@@ -41,7 +42,11 @@ def test_builtin_defaults_loaded():
     of the fabricated/insecure one.
     """
     config = load_config(config_file="/nonexistent/path/to/codepulse.toml")
-    assert config.db_url == "sqlite:///codepulse.db"
+    # The default database is no longer the fixed string "sqlite:///codepulse.db": it is one database per user, or
+    # the codepulse.db already in the working directory (see codepulse/data_location.py and
+    # tests/test_default_database_location.py, which pin the rule). Asserting the fixed string here would pass or
+    # fail depending on whether the directory the tests run from happens to hold a codepulse.db.
+    assert config.db_url == default_database_url()
     assert config.embedding_model == "all-MiniLM-L6-v2"
     assert config.embedding_device == "cpu"
     assert config.embedding_dimension == 384

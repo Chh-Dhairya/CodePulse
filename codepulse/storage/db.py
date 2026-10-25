@@ -449,6 +449,10 @@ class StorageManager:
             from codepulse.config import get_settings
             db_url = get_settings().db_url
         self.db_url = db_url
+        # The per-user data directory is created on demand; any other missing directory is still an error.
+        from codepulse.data_location import ensure_database_directory
+
+        ensure_database_directory(db_url)
         self.engine = create_engine(db_url, echo=False)
 
         # Backend-hardening addition (not a roadmap sprint item): SQLite

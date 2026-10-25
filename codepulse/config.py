@@ -7,6 +7,8 @@ import tomllib
 from typing import Any, Optional
 from pydantic import BaseModel, Field, model_validator
 
+from codepulse.data_location import default_database_url
+
 
 class CodePulseConfig(BaseModel):
     """
@@ -18,8 +20,12 @@ class CodePulseConfig(BaseModel):
 
     # Storage & Database
     db_url: str = Field(
-        default="sqlite:///codepulse.db",
-        description="Database connection URL (e.g., sqlite:///codepulse.db)",
+        default_factory=default_database_url,
+        description=(
+            "Database connection URL (e.g., sqlite:///codepulse.db). Unset, it is ONE database per user in the "
+            "operating system's per-user data directory (see codepulse.data_location), or the codepulse.db already "
+            "in the working directory if there is one (the previous default)."
+        ),
     )
 
     # Embedding Settings
