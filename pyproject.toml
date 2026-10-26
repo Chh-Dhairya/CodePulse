@@ -137,7 +137,10 @@ dev = [
     "pytest-asyncio>=0.23.7",
     "pytest-cov>=5.0.0",
     "ruff>=0.4.8",
-    "mypy>=1.10.0"
+    "mypy>=1.10.0",
+    # tests/test_migrate_command.py imports setuptools to check what the build would include. Python 3.12
+    # virtual environments no longer ship it (found by the first GitHub CI run), so it is declared here.
+    "setuptools>=68.0"
 ]
 
 [build-system]

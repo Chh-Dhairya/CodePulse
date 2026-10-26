@@ -356,7 +356,16 @@ def test_display_db_path_resolves_a_relative_sqlite_path_to_absolute(tmp_path, m
     assert shown == f"sqlite:///{str(tmp_path / 'codepulse.db').replace(chr(92), '/')}"
 
 
-def test_display_db_path_leaves_an_already_absolute_sqlite_path_unchanged():
+def test_display_db_path_leaves_an_already_absolute_sqlite_path_unchanged(tmp_path):
+    # An absolute path of THIS operating system: "C:/..." is absolute only on Windows (on Linux it is a relative path
+    # that happens to start with "C:", which the function correctly resolves against the working directory; the
+    # first CI run on GitHub's Linux machines caught the old test using a Windows path unconditionally).
+    absolute = f"sqlite:///{(tmp_path / 'some' / 'abs' / 'path.db').as_posix()}"
+    assert cli._display_db_path(absolute) == absolute
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a drive-letter path is absolute only on Windows")
+def test_display_db_path_leaves_a_windows_drive_path_unchanged():
     assert cli._display_db_path("sqlite:///C:/some/abs/path.db") == "sqlite:///C:/some/abs/path.db"
 
 
