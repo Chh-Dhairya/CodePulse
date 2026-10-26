@@ -125,6 +125,12 @@ dependencies = [
     "structlog>=24.1.0,<24.2.0"
 ]
 
+[project.urls]
+Homepage = "https://github.com/Chh-Dhairya/CodePulse"
+Repository = "https://github.com/Chh-Dhairya/CodePulse"
+Issues = "https://github.com/Chh-Dhairya/CodePulse/issues"
+Documentation = "https://github.com/Chh-Dhairya/CodePulse/tree/HEAD/docs"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2.0",

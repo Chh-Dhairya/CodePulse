@@ -91,7 +91,7 @@ The connection is scoped to the repositories the key can access. The MCP tools c
 
 ## VS Code extension
 
-A separate extension (CodeLens, hovers, impact tree, MCP registration) lives in its own repository, `codepulse-vscode`. It talks to a running `codepulse serve` using a scoped API key.
+A separate extension (CodeLens, hovers, impact tree, MCP registration) lives in its own repository, [`codepulse-vscode`](https://github.com/Chh-Dhairya/codepulse-vscode). It talks to a running `codepulse serve` using a scoped API key.
 
 ## Configuration
 
@@ -128,13 +128,13 @@ Schema changes go through Alembic (`codepulse/storage/schema_migrations/`; `alem
 
 ## Project documents
 
-- [`docs/CodePulse_Strategy_and_Roadmap.md`](docs/CodePulse_Strategy_and_Roadmap.md): the authoritative strategy, architecture, and milestone plan.
-- [`docs/CODEPULSE_PRODUCT_AND_ARCHITECTURE.md`](docs/CODEPULSE_PRODUCT_AND_ARCHITECTURE.md): what CodePulse is and how it is built, as shipped.
-- [`docs/CODEPULSE_CLIENT_STRATEGY.md`](docs/CODEPULSE_CLIENT_STRATEGY.md): the plan for the VS Code extension and other clients.
-- [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md): backing up and restoring a database.
-- [`docs/ORIGINAL_DESIGN.md`](docs/ORIGINAL_DESIGN.md): the original design, kept for history (it describes infrastructure that was never built).
-- [`docs/internal/`](docs/internal/): the working log (`CODEPULSE_PROGRESS.md`: what is built and verified, milestone by milestone) and `CODEPULSE_FUTURE_CHANGES.md` (known limitations and planned improvements).
+- [`docs/CodePulse_Strategy_and_Roadmap.md`](https://github.com/Chh-Dhairya/CodePulse/blob/HEAD/docs/CodePulse_Strategy_and_Roadmap.md): the authoritative strategy, architecture, and milestone plan.
+- [`docs/CODEPULSE_PRODUCT_AND_ARCHITECTURE.md`](https://github.com/Chh-Dhairya/CodePulse/blob/HEAD/docs/CODEPULSE_PRODUCT_AND_ARCHITECTURE.md): what CodePulse is and how it is built, as shipped.
+- [`docs/CODEPULSE_CLIENT_STRATEGY.md`](https://github.com/Chh-Dhairya/CodePulse/blob/HEAD/docs/CODEPULSE_CLIENT_STRATEGY.md): the plan for the VS Code extension and other clients.
+- [`docs/BACKUP_RESTORE.md`](https://github.com/Chh-Dhairya/CodePulse/blob/HEAD/docs/BACKUP_RESTORE.md): backing up and restoring a database.
+- [`docs/ORIGINAL_DESIGN.md`](https://github.com/Chh-Dhairya/CodePulse/blob/HEAD/docs/ORIGINAL_DESIGN.md): the original design, kept for history (it describes infrastructure that was never built).
+- [`docs/internal/`](https://github.com/Chh-Dhairya/CodePulse/tree/HEAD/docs/internal/): the working log (`CODEPULSE_PROGRESS.md`: what is built and verified, milestone by milestone) and `CODEPULSE_FUTURE_CHANGES.md` (known limitations and planned improvements).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/Chh-Dhairya/CodePulse/blob/HEAD/LICENSE).

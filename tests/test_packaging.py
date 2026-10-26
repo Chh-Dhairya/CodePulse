@@ -70,3 +70,28 @@ def test_no_placeholder_text_in_the_published_metadata():
     text = repr(project)
     for placeholder in ("YOUR-GITHUB", "TODO", "FIXME", "example.com", "<user>"):
         assert placeholder not in text, f"placeholder {placeholder!r} would be published to PyPI"
+
+
+def test_pyproject_links_to_the_real_repository():
+    """PyPI shows these in the sidebar; they must point at the real GitHub project, not a placeholder."""
+    urls = _pyproject()["project"].get("urls", {})
+    base = "https://github.com/Chh-Dhairya/CodePulse"
+    assert urls.get("Homepage") == base
+    assert urls.get("Repository") == base
+    assert urls.get("Issues") == f"{base}/issues"
+    assert urls.get("Documentation", "").startswith(f"{base}/")
+    assert all(u.startswith("https://") for u in urls.values())
+
+
+def test_the_readme_has_no_relative_links_because_pypi_does_not_resolve_them():
+    """PyPI renders README.md as the project page and leaves a link like `docs/x.md` pointing nowhere."""
+    import re
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    relative = [m for m in re.findall(r"\]\(([^)\s]+)\)", readme) if not re.match(r"(https?://|#|mailto:)", m)]
+    assert relative == [], f"relative links break on the PyPI page: {relative}"
+
+
+def test_build_output_is_ignored_so_it_cannot_be_committed():
+    ignored = {line.strip() for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()}
+    assert "dist/" in ignored and "build/" in ignored
